@@ -33,6 +33,10 @@ rustPlatform.buildRustPackage {
     ".*xtask(/.*)?"
   ];
 
+  preConfigure = ''
+    export HOME=$out
+  '';
+
   cargoBuildFlags =
     if build_tasks
     then [ "-p devenv-tasks" ]
