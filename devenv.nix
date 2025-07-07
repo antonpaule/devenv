@@ -5,7 +5,7 @@
 , ...
 }:
 {
-  env.DEVENV_NIX = inputs.nix.packages.${pkgs.stdenv.system}.nix;
+  env.DEVENV_NIX = inputs.nix.packages.${pkgs.stdenv.system}.nix-cli;
   # ignore annoying browserlists warning that breaks pre-commit hooks
   env.BROWSERSLIST_IGNORE_OLD_DATA = "1";
   env.RUST_LOG = "devenv=debug";
@@ -27,12 +27,12 @@
     pkgs.cargo-outdated # Find outdated crates
     pkgs.cargo-machete # Find unused crates
     pkgs.cargo-edit # Adds the set-version command
+    pkgs.protobuf
   ];
 
   languages.nix.enable = true;
   # for cli
   languages.rust.enable = true;
-  languages.rust.channel = "nightly";
   # for docs
   languages.python.enable = true;
   # it breaks glibc

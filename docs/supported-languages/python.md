@@ -3,7 +3,9 @@
 
 [comment]: # (Please add your documentation on top of this line)
 
-## languages\.python\.enable
+## Options
+
+### languages\.python\.enable
 
 
 
@@ -26,7 +28,7 @@ boolean
 
 
 
-## languages\.python\.package
+### languages\.python\.package
 
 
 
@@ -44,7 +46,7 @@ package
 
 
 
-## languages\.python\.directory
+### languages\.python\.directory
 
 The Python project’s root directory\. Defaults to the root of the devenv project\.
 Can be an absolute path or one relative to the root of the devenv project\.
@@ -66,7 +68,7 @@ string
 
 
 
-## languages\.python\.libraries
+### languages\.python\.libraries
 
 
 
@@ -90,7 +92,7 @@ list of absolute path
 
 
 
-## languages\.python\.manylinux\.enable
+### languages\.python\.manylinux\.enable
 
 
 
@@ -112,7 +114,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.enable
+### languages\.python\.poetry\.enable
 
 
 
@@ -135,7 +137,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.package
+### languages\.python\.poetry\.package
 
 
 
@@ -153,7 +155,7 @@ package
 
 
 
-## languages\.python\.poetry\.activate\.enable
+### languages\.python\.poetry\.activate\.enable
 
 
 
@@ -171,7 +173,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.install\.enable
+### languages\.python\.poetry\.install\.enable
 
 
 
@@ -194,7 +196,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.install\.allExtras
+### languages\.python\.poetry\.install\.allExtras
 
 
 
@@ -212,7 +214,25 @@ boolean
 
 
 
-## languages\.python\.poetry\.install\.compile
+### languages\.python\.poetry\.install\.allGroups
+
+
+
+Whether to install all groups\. See ` --all-groups `\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+
+
+### languages\.python\.poetry\.install\.compile
 
 
 
@@ -230,7 +250,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.install\.extras
+### languages\.python\.poetry\.install\.extras
 
 
 
@@ -248,7 +268,7 @@ list of string
 
 
 
-## languages\.python\.poetry\.install\.groups
+### languages\.python\.poetry\.install\.groups
 
 
 
@@ -266,7 +286,7 @@ list of string
 
 
 
-## languages\.python\.poetry\.install\.ignoredGroups
+### languages\.python\.poetry\.install\.ignoredGroups
 
 
 
@@ -284,7 +304,7 @@ list of string
 
 
 
-## languages\.python\.poetry\.install\.installRootPackage
+### languages\.python\.poetry\.install\.installRootPackage
 
 
 
@@ -302,7 +322,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.install\.onlyGroups
+### languages\.python\.poetry\.install\.onlyGroups
 
 
 
@@ -320,7 +340,7 @@ list of string
 
 
 
-## languages\.python\.poetry\.install\.onlyInstallRootPackage
+### languages\.python\.poetry\.install\.onlyInstallRootPackage
 
 
 
@@ -338,7 +358,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.install\.quiet
+### languages\.python\.poetry\.install\.quiet
 
 
 
@@ -356,7 +376,7 @@ boolean
 
 
 
-## languages\.python\.poetry\.install\.verbosity
+### languages\.python\.poetry\.install\.verbosity
 
 
 
@@ -374,7 +394,7 @@ one of “no”, “little”, “more”, “debug”
 
 
 
-## languages\.python\.uv\.enable
+### languages\.python\.uv\.enable
 
 
 
@@ -397,7 +417,7 @@ boolean
 
 
 
-## languages\.python\.uv\.package
+### languages\.python\.uv\.package
 
 
 
@@ -415,7 +435,7 @@ package
 
 
 
-## languages\.python\.uv\.sync\.enable
+### languages\.python\.uv\.sync\.enable
 
 
 
@@ -438,7 +458,7 @@ boolean
 
 
 
-## languages\.python\.uv\.sync\.allExtras
+### languages\.python\.uv\.sync\.allExtras
 
 
 
@@ -456,7 +476,25 @@ boolean
 
 
 
-## languages\.python\.uv\.sync\.extras
+### languages\.python\.uv\.sync\.allGroups
+
+
+
+Whether to install all groups\. See ` --all-groups `\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+
+
+### languages\.python\.uv\.sync\.extras
 
 
 
@@ -474,7 +512,25 @@ list of string
 
 
 
-## languages\.python\.venv\.enable
+### languages\.python\.uv\.sync\.groups
+
+
+
+Which dependency groups to install\. See ` --group `\.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+
+
+### languages\.python\.venv\.enable
 
 
 
@@ -497,7 +553,7 @@ boolean
 
 
 
-## languages\.python\.venv\.quiet
+### languages\.python\.venv\.quiet
 
 
 
@@ -515,7 +571,7 @@ boolean
 
 
 
-## languages\.python\.venv\.requirements
+### languages\.python\.venv\.requirements
 
 
 
@@ -534,7 +590,7 @@ null or strings concatenated with “\\n” or absolute path
 
 
 
-## languages\.python\.version
+### languages\.python\.version
 
 
 

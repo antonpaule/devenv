@@ -1,11 +1,11 @@
-use super::{cli, cnix, config, tasks, util};
+use super::{cli, config, nix_backend, tasks, util};
+use ::nix::sys::signal;
+use ::nix::unistd::Pid;
 use clap::crate_version;
 use cli_table::Table;
 use cli_table::{print_stderr, WithTitle};
 use include_dir::{include_dir, Dir};
 use miette::{bail, Context, IntoDiagnostic, Result};
-use nix::sys::signal;
-use nix::unistd::Pid;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use sha2::Digest;
@@ -66,7 +66,7 @@ pub struct Devenv {
     pub config: config::Config,
     pub global_options: cli::GlobalOptions,
 
-    nix: cnix::Nix,
+    pub nix: Box<dyn nix_backend::NixBackend>,
 
     // All kinds of paths
     devenv_root: PathBuf,
@@ -121,17 +121,35 @@ impl Devenv {
         std::fs::create_dir_all(&devenv_home_gc)
             .expect("Failed to create DEVENV_HOME_GC directory");
 
-        let nix = cnix::Nix::new(
-            options.config.clone(),
-            global_options.clone(),
+        // Determine backend type from config
+        let backend_type = options.config.backend.clone();
+
+        // Create DevenvPaths struct
+        let paths = nix_backend::DevenvPaths {
+            root: devenv_root.clone(),
+            dotfile: devenv_dotfile.clone(),
+            dot_gc: devenv_dot_gc.clone(),
+            home_gc: devenv_home_gc.clone(),
             cachix_trusted_keys,
-            devenv_home_gc.clone(),
-            devenv_dotfile.clone(),
-            devenv_dot_gc.clone(),
-            devenv_root.clone(),
-        )
-        .await
-        .expect("Failed to initialize Nix");
+        };
+
+        let nix: Box<dyn nix_backend::NixBackend> = match backend_type {
+            config::NixBackendType::Nix => Box::new(
+                crate::nix::Nix::new(options.config.clone(), global_options.clone(), paths)
+                    .await
+                    .expect("Failed to initialize Nix backend"),
+            ),
+            #[cfg(feature = "snix")]
+            config::NixBackendType::Snix => Box::new(
+                crate::snix_backend::SnixBackend::new(
+                    options.config.clone(),
+                    global_options.clone(),
+                    paths,
+                )
+                .await
+                .expect("Failed to initialize Snix backend"),
+            ),
+        };
 
         Self {
             config: options.config,
@@ -228,10 +246,10 @@ impl Devenv {
 
     // TODO: fetch bash from the module system
     async fn get_bash(&mut self, refresh_cached_output: bool) -> Result<String> {
-        let options = cnix::Options {
+        let options = nix_backend::Options {
             cache_output: true,
             refresh_cached_output,
-            ..self.nix.options
+            ..Default::default()
         };
         let bash_attr = format!(
             "nixpkgs#legacyPackages.{}.bashInteractive.out",
@@ -270,7 +288,7 @@ impl Devenv {
         cmd: &Option<String>,
         args: &[String],
     ) -> Result<std::process::Command> {
-        let DevEnv { mut output, .. } = self.get_dev_environment(false).await?;
+        let DevEnv { output, .. } = self.get_dev_environment(false).await?;
 
         let bash = match self.get_bash(false).await {
             Err(e) => {
@@ -282,6 +300,21 @@ impl Devenv {
 
         let mut shell_cmd = std::process::Command::new(&bash);
         let path = self.devenv_runtime.join("shell");
+
+        // Load the user's bashrc if it exists and if we're in an interactive shell.
+        // Disable alias expansion to avoid breaking the dev shell script.
+        let mut output = indoc::formatdoc! {
+            r#"
+            if [ -n "$PS1" ] && [ -e $HOME/.bashrc ]; then
+                source $HOME/.bashrc;
+            fi
+
+            shopt -u expand_aliases
+            {}
+            shopt -s expand_aliases
+            "#,
+            String::from_utf8_lossy(&output)
+        };
 
         match cmd {
             // Non-interactive mode.
@@ -295,7 +328,7 @@ impl Devenv {
                         .collect::<Vec<_>>()
                         .join(" ")
                 );
-                output.extend_from_slice(command.as_bytes());
+                output.push_str(&command);
                 shell_cmd.arg(&path);
             }
             // Interactive mode. Use an rcfile.
@@ -304,7 +337,7 @@ impl Devenv {
             }
         }
 
-        tokio::fs::write(&path, &output)
+        tokio::fs::write(&path, output)
             .await
             .expect("Failed to write the shell script");
         tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -319,12 +352,7 @@ impl Devenv {
             };
 
             let filtered_env = std::env::vars().filter(|(k, _)| keep.contains(k));
-
-            shell_cmd
-                .env_clear()
-                .envs(filtered_env)
-                .arg("--norc")
-                .arg("--noprofile");
+            shell_cmd.env_clear().envs(filtered_env);
         }
 
         shell_cmd.env("SHELL", &bash);
@@ -545,7 +573,7 @@ impl Devenv {
     pub async fn search(&mut self, name: &str) -> Result<()> {
         self.assemble(false).await?;
 
-        let build_options = cnix::Options {
+        let build_options = nix_backend::Options {
             logging: false,
             cache_output: true,
             ..Default::default()
@@ -624,6 +652,16 @@ impl Devenv {
         if roots.is_empty() {
             bail!("No tasks specified.");
         }
+
+        // Capture the shell environment to ensure tasks run with proper devenv setup
+        let envs = self.capture_shell_environment().await?;
+
+        // Set environment variables in the current process
+        // This ensures that tasks have access to all devenv environment variables
+        for (key, value) in &envs {
+            std::env::set_var(key, value);
+        }
+
         let tasks_json_file = {
             // TODO: No newline
             let span = info_span!("tasks_run", devenv.user_message = "Evaluating tasks");
@@ -671,27 +709,10 @@ impl Devenv {
         Ok(())
     }
 
-    pub async fn test(&mut self) -> Result<()> {
-        self.assemble(true).await?;
-
-        // collect tests
-        let test_script = {
-            let span = info_span!("test", devenv.user_message = "Building tests");
-            self.nix
-                .build(&["devenv.test"], None)
-                .instrument(span)
-                .await?
-        };
-        let test_script_path = &test_script[0];
-
-        // Add GC root for test script to prevent garbage collection
-        self.nix.add_gc("test", test_script_path).await?;
-
-        let test_script = test_script_path.to_string_lossy().to_string();
-
-        let temp_dir = tempfile::TempDir::with_prefix("devenv-test")
+    async fn capture_shell_environment(&mut self) -> Result<HashMap<String, String>> {
+        let temp_dir = tempfile::TempDir::with_prefix("devenv-env")
             .into_diagnostic()
-            .wrap_err("Failed to create temporary directory for test")?;
+            .wrap_err("Failed to create temporary directory for environment capture")?;
 
         let script_path = temp_dir.path().join("script");
         let env_path = temp_dir.path().join("env");
@@ -757,6 +778,29 @@ impl Devenv {
         for (key, value) in shell_envs {
             envs.insert(key, value);
         }
+
+        Ok(envs)
+    }
+
+    pub async fn test(&mut self) -> Result<()> {
+        self.assemble(true).await?;
+
+        // collect tests
+        let test_script = {
+            let span = info_span!("test", devenv.user_message = "Building tests");
+            self.nix
+                .build(&["devenv.test"], None)
+                .instrument(span)
+                .await?
+        };
+        let test_script_path = &test_script[0];
+
+        // Add GC root for test script to prevent garbage collection
+        self.nix.add_gc("test", test_script_path).await?;
+
+        let test_script = test_script_path.to_string_lossy().to_string();
+
+        let envs = self.capture_shell_environment().await?;
 
         if self.has_processes().await? {
             let options = ProcessOptions {
@@ -884,7 +928,7 @@ impl Devenv {
 
         let span = info_span!("up", devenv.user_message = "Starting processes");
         async {
-            let processes = processes.join("");
+            let processes = processes.join(" ");
 
             let processes_script = self.devenv_dotfile.join("processes");
             // we force disable process compose tui if detach is enabled

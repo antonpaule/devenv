@@ -171,10 +171,13 @@ impl<'a> CachedCommand<'a> {
                 | Op::ReadDir { source }
                 | Op::PathExists { source }
                 | Op::TrackedPath { source }
-                    if !self
-                        .excluded_paths
-                        .iter()
-                        .any(|path| source.starts_with(path)) =>
+                    // Filter out paths that don't impact caching
+                    if source.starts_with("/")
+                        && !source.starts_with("/nix/store")
+                        && !self
+                            .excluded_paths
+                            .iter()
+                            .any(|path| source.starts_with(path)) =>
                 {
                     sources.push(source);
                 }
@@ -589,23 +592,9 @@ async fn query_file_inputs(sources: &[PathBuf]) -> Vec<FileInputDesc> {
 }
 
 /// Convert a parse log line into into an `Op`.
-/// Filters out paths that don't impact caching.
 fn extract_op_from_log_line(log: &InternalLog) -> Option<Op> {
     match log {
-        InternalLog::Msg { .. } => Op::from_internal_log(log).and_then(|op| match op {
-            Op::EvaluatedFile { ref source }
-            | Op::ReadFile { ref source }
-            | Op::ReadDir { ref source }
-            | Op::CopiedSource { ref source, .. }
-            | Op::PathExists { ref source, .. }
-            | Op::TrackedPath { ref source }
-                if source.starts_with("/") && !source.starts_with("/nix/store") =>
-            {
-                Some(op)
-            }
-            Op::GetEnv { .. } => Some(op),
-            _ => None,
-        }),
+        InternalLog::Msg { .. } => Op::from_internal_log(log),
         _ => None,
     }
 }
@@ -748,7 +737,7 @@ mod test {
 
         assert!(matches!(
             check_file_state(&file_row.into()),
-            Ok(FileState::Unchanged { .. })
+            Ok(FileState::Unchanged)
         ));
     }
 
@@ -757,11 +746,8 @@ mod test {
         let temp_dir = TempDir::with_prefix("test_metadata_modified_file").unwrap();
         let file_row = create_file_row(&temp_dir, b"Hello, World!");
 
-        // Sleep to ensure the new modification time is different
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        // Update the file's timestamp
-        let new_time = SystemTime::now();
+        // Update the file's timestamp to ensure it's different
+        let new_time = SystemTime::now() + std::time::Duration::from_secs(1);
         let file = File::open(&file_row.path).unwrap();
         file.set_modified(new_time).unwrap();
         drop(file);
@@ -777,11 +763,13 @@ mod test {
         let temp_dir = TempDir::with_prefix("test_content_modified_file").unwrap();
         let file_row = create_file_row(&temp_dir, b"Hello, World!");
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
         // Modify the file contents
         let mut file = File::create(&file_row.path).unwrap();
         file.write_all(b"Modified content").unwrap();
+
+        // Set mtime to ensure it's different from original
+        let new_time = SystemTime::now() + std::time::Duration::from_secs(1);
+        file.set_modified(new_time).unwrap();
 
         assert!(matches!(
             check_file_state(&file_row.into()),

@@ -159,7 +159,7 @@ fn compute_directory_hash<P: AsRef<Path>>(path: P) -> CacheResult<Option<String>
                     let entry_type = if meta.is_dir() { "dir" } else { "file" };
                     let modified = meta
                         .modified()
-                        .map(|t| time::system_time_to_unix_seconds(t))
+                        .map(time::system_time_to_unix_seconds)
                         .unwrap_or(0);
 
                     entries.push(format!("{} {} {}", entry_type, modified, entry_path));
@@ -251,10 +251,13 @@ mod tests {
         assert!(!tracked.is_modified().unwrap());
 
         // Modify the file
-        std::thread::sleep(std::time::Duration::from_millis(10)); // Ensure modification time changes
         {
             let mut file = File::create(&file_path).unwrap();
             file.write_all(b"modified content").unwrap();
+
+            // Set mtime to ensure it's different from original
+            let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+            file.set_modified(new_time).unwrap();
         }
 
         // Modification check should now return true

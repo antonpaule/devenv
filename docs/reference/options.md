@@ -620,6 +620,11 @@ null or package
 *Default:*
 ` if pkgs.stdenv.isDarwin then pkgs.apple-sdk else null `
 
+
+
+*Example:*
+` pkgs.apple-sdk_15 `
+
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/top-level.nix](https://github.com/cachix/devenv/blob/main/src/modules/top-level.nix)
 
@@ -1837,7 +1842,7 @@ string
 
 
 *Default:*
-` "1.6.1" `
+` "1.7" `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/update-check.nix](https://github.com/cachix/devenv/blob/main/src/modules/update-check.nix)
@@ -14408,6 +14413,27 @@ boolean
 
 
 
+## languages.python.poetry.install.allGroups
+
+
+
+Whether to install all groups. See ` --all-groups `.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix)
+
+
+
 ## languages.python.poetry.install.compile
 
 
@@ -14691,11 +14717,53 @@ boolean
 
 
 
+## languages.python.uv.sync.allGroups
+
+
+
+Whether to install all groups. See ` --all-groups `.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix)
+
+
+
 ## languages.python.uv.sync.extras
 
 
 
 Which extras to install. See ` --extra `.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/python.nix)
+
+
+
+## languages.python.uv.sync.groups
+
+
+
+Which dependency groups to install. See ` --group `.
 
 
 
@@ -15296,7 +15364,7 @@ string
 
 
 
-List of extra [targets](https://github.com/nix-community/fenix\#supported-platforms-and-targets)
+List of extra [targets](https://doc.rust-lang.org/nightly/rustc/platform-support.html)
 to install. Defaults to only the native target.
 
 
@@ -15434,6 +15502,28 @@ null or package
 
 *Default:*
 ` pkgs.rustfmt `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix)
+
+
+
+## languages.rust.version
+
+
+
+Which version of rust to use, this value could be ` latest `,` 1.81.0 `, ` 2021-01-01 `.
+Only works when languages.rust.channel is NOT nixpkgs.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "latest" `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix)
@@ -16250,6 +16340,27 @@ package
 
 
 
+## languages.zig.zls.package
+
+
+
+Which package of zls to use.
+
+
+
+*Type:*
+package
+
+
+
+*Default:*
+` pkgs.zls `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/zig.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/zig.nix)
+
+
+
 ## name
 
 
@@ -16285,6 +16396,11 @@ outputOf (attribute set)
 
 
 *Default:*
+` { } `
+
+
+
+*Example:*
 
 ```
 {
@@ -19416,6 +19532,28 @@ list of absolute path
 
 
 
+## services.keycloak.processes.exportRealms
+
+
+
+Global toggle to enable/disable the realms export process ` keycloak-realm-export-all `
+if any realms have ` realms.«name».export == true `.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/services/keycloak.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/keycloak.nix)
+
+
+
 ## services.keycloak.realms
 
 
@@ -19527,6 +19665,28 @@ null or relative path not in the Nix store
 
 *Example:*
 ` "./realms/a.json" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/services/keycloak.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/keycloak.nix)
+
+
+
+## services.keycloak.scripts.exportRealm
+
+
+
+Global toggle to enable/disable the **single** realm export
+script ` keycloak-realm-export `.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/services/keycloak.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/keycloak.nix)
@@ -21424,6 +21584,30 @@ string
 
 *Default:*
 ` "127.0.0.1" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/services/opensearch.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/opensearch.nix)
+
+
+
+## services.opensearch.settings."plugins.security.disabled"
+
+
+
+Whether to disable the security plugin. When set to false, SSL configuration is required.
+To enable SSL, set ` plugins.security.ssl.transport.keystore_filepath ` or both
+` plugins.security.ssl.transport.server.pemcert_filepath ` and
+` plugins.security.ssl.transport.client.pemcert_filepath `.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/services/opensearch.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/opensearch.nix)

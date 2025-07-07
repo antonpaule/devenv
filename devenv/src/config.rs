@@ -6,6 +6,32 @@ use std::{collections::BTreeMap, fmt, path::Path};
 
 const YAML_CONFIG: &str = "devenv.yaml";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, schematic::Schematic)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum NixBackendType {
+    #[default]
+    Nix,
+    #[cfg(feature = "snix")]
+    Snix,
+}
+
+#[derive(schematic::Config, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[config(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+pub struct NixpkgsConfig {
+    #[serde(skip_serializing_if = "is_false", default = "false_default")]
+    pub allow_unfree: bool,
+    #[serde(skip_serializing_if = "is_false", default = "false_default")]
+    pub allow_broken: bool,
+    #[serde(skip_serializing_if = "is_false", default = "false_default")]
+    pub cuda_support: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub cuda_capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub permitted_insecure_packages: Vec<String>,
+}
+
 #[derive(schematic::Config, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[config(rename_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +118,20 @@ pub struct Clean {
 #[derive(schematic::Config, Clone, Serialize, Debug, JsonSchema)]
 #[config(rename_all = "camelCase", allow_unknown_fields)]
 #[serde(rename_all = "camelCase")]
+pub struct Nixpkgs {
+    #[serde(flatten)]
+    pub config_: NixpkgsConfig,
+    #[serde(
+        rename = "per-platform",
+        skip_serializing_if = "BTreeMap::is_empty",
+        default
+    )]
+    pub per_platform: BTreeMap<String, NixpkgsConfig>,
+}
+
+#[derive(schematic::Config, Clone, Serialize, Debug, JsonSchema)]
+#[config(rename_all = "camelCase", allow_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     #[setting(nested)]
@@ -100,6 +140,9 @@ pub struct Config {
     pub allow_unfree: bool,
     #[serde(skip_serializing_if = "is_false", default = "false_default")]
     pub allow_broken: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[setting(nested)]
+    pub nixpkgs: Option<Nixpkgs>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub imports: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -109,6 +152,8 @@ pub struct Config {
     pub clean: Option<Clean>,
     #[serde(skip_serializing_if = "is_false", default = "false_default")]
     pub impure: bool,
+    #[serde(default)]
+    pub backend: NixBackendType,
 }
 
 // TODO: https://github.com/moonrepo/schematic/issues/105

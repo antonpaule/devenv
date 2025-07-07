@@ -87,7 +87,7 @@ let
               echo "${requirements}" > "$VENV_PATH/.devenv_requirements"
               ${if cfg.uv.enable then ''
                 echo "Requirements changed, running uv pip install -r ${requirements}..."
-                ${cfg.uv.package}/bin/uv pip install -r ${requirements}
+                ${cfg.uv.package}/bin/uv pip install --python "$VENV_PATH/bin/python" -r ${requirements}
               ''
               else ''
                   echo "Requirements changed, running pip install -r ${requirements}..."
@@ -132,6 +132,16 @@ let
       # Add all-extras flag if enabled
       ${lib.optionalString cfg.uv.sync.allExtras ''
         UV_SYNC_COMMAND+=(--all-extras)
+      ''}
+
+      # Add groups if specified
+      ${lib.concatMapStrings (group: ''
+        UV_SYNC_COMMAND+=(--group "${group}")
+      '') cfg.uv.sync.groups}
+
+      # Add all-groups flag if enabled
+      ${lib.optionalString cfg.uv.sync.allGroups ''
+        UV_SYNC_COMMAND+=(--all-groups)
       ''}
 
       # Avoid running "uv sync" for every shell.
@@ -333,6 +343,16 @@ in
           default = false;
           description = "Whether to install all extras. See `--all-extras`.";
         };
+        groups = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          description = "Which dependency groups to install. See `--group`.";
+        };
+        allGroups = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Whether to install all groups. See `--all-groups`.";
+        };
       };
     };
 
@@ -381,6 +401,11 @@ in
           default = [ ];
           description = "Which dependency groups to exclusively install. See `--only`.";
         };
+        allGroups = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Whether to install all groups. See `--all-groups`.";
+        };
         extras = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [ ];
@@ -421,6 +446,7 @@ in
       lib.optionals (cfg.poetry.install.groups != [ ]) [ "--with" ''"${lib.concatStringsSep "," cfg.poetry.install.groups}"'' ] ++
       lib.optionals (cfg.poetry.install.ignoredGroups != [ ]) [ "--without" ''"${lib.concatStringsSep "," cfg.poetry.install.ignoredGroups}"'' ] ++
       lib.optionals (cfg.poetry.install.onlyGroups != [ ]) [ "--only" ''"${lib.concatStringsSep " " cfg.poetry.install.onlyGroups}"'' ] ++
+      lib.optional cfg.poetry.install.allGroups "--all-groups" ++
       lib.optionals (cfg.poetry.install.extras != [ ]) [ "--extras" ''"${lib.concatStringsSep " " cfg.poetry.install.extras}"'' ] ++
       lib.optional cfg.poetry.install.allExtras "--all-extras" ++
       lib.optional (cfg.poetry.install.verbosity == "little") "-v" ++
@@ -445,6 +471,8 @@ in
       UV_PROJECT_ENVIRONMENT = "${config.env.DEVENV_STATE}/venv";
       # Force uv not to download a Python binary when the version in pyproject.toml does not match the one installed by devenv
       UV_PYTHON_DOWNLOADS = "never";
+      # Force uv to always use the correct python interpreter.
+      UV_PYTHON = "${cfg.package.interpreter}";
     }) // (lib.optionalAttrs cfg.poetry.enable {
       # Make poetry use DEVENV_ROOT/.venv
       POETRY_VIRTUALENVS_IN_PROJECT = "true";

@@ -63,6 +63,11 @@ impl TaskCache {
             return Ok(false);
         }
 
+        debug!(
+            "Checking modified files for task '{}': {:?}",
+            task_name, files
+        );
+
         // Check each file for modifications
         for path in files {
             let modified = self.is_file_modified(task_name, path).await?;
@@ -72,6 +77,7 @@ impl TaskCache {
             }
         }
 
+        debug!("No files modified for task '{}'", task_name);
         Ok(false)
     }
 
@@ -153,7 +159,11 @@ impl TaskCache {
     }
 
     /// Update the file state in the database.
-    async fn update_file_state(&self, task_name: &str, path: &str) -> CacheResult<()> {
+    pub async fn update_file_state(&self, task_name: &str, path: &str) -> CacheResult<()> {
+        debug!(
+            "Updating file state for task '{}', path '{}'",
+            task_name, path
+        );
         // Use the TrackedFile from the shared library to compute file info
         let tracked_file = TrackedFile::new(path)?;
         self.update_file_state_with_file(task_name, &tracked_file)
@@ -161,7 +171,7 @@ impl TaskCache {
     }
 
     /// Fetch file information from the database
-    async fn fetch_file_info(
+    pub async fn fetch_file_info(
         &self,
         task_name: &str,
         path: &str,
@@ -182,12 +192,20 @@ impl TaskCache {
 
     /// Check if a file has been modified since the last time the task was run.
     async fn is_file_modified(&self, task_name: &str, path: &str) -> CacheResult<bool> {
+        debug!(
+            "Checking if file '{}' is modified for task '{}'",
+            path, task_name
+        );
+
         // Fetch the existing file info
         let file_info = self.fetch_file_info(task_name, path).await?;
 
         // If file not in database, consider it modified
         if file_info.is_none() {
-            debug!("File {} not found in cache for task {}", path, task_name);
+            debug!(
+                "File {} not found in cache for task {} - considering it modified (first time)",
+                path, task_name
+            );
             self.update_file_state(task_name, path).await?;
             return Ok(true);
         }
@@ -206,15 +224,21 @@ impl TaskCache {
                 let current_modified_time =
                     time::system_time_to_unix_seconds(current_file.modified_at);
                 let current_hash = current_file.content_hash.clone().unwrap_or_default();
+                let stored_hash_str = stored_hash.clone().unwrap_or_default();
+
+                debug!(
+                    "File '{}' for task '{}': stored_hash={:?}, current_hash={}, stored_time={}, current_time={}, is_dir={}",
+                    path, task_name, stored_hash, current_hash, stored_modified_time, current_modified_time, is_directory
+                );
 
                 // Combine checking for file type and hash changes
-                let content_changed = current_file.is_directory != is_directory
-                    || current_hash != stored_hash.unwrap_or_default();
+                let content_changed =
+                    current_file.is_directory != is_directory || current_hash != stored_hash_str;
 
                 if content_changed {
                     debug!(
-                        "File {} changed for task {}: type or content changed",
-                        path, task_name
+                        "File {} changed for task {}: type or content changed (is_dir: {} -> {}, hash: {:?} -> {})",
+                        path, task_name, is_directory, current_file.is_directory, stored_hash, current_hash
                     );
                     // Update the file state using the already loaded instance
                     self.update_file_state_with_file(task_name, &current_file)
@@ -225,14 +249,15 @@ impl TaskCache {
                 // If only timestamp changed but hash didn't, update the timestamp without considering it modified
                 if current_modified_time > stored_modified_time {
                     debug!(
-                        "File {} timestamp changed for task {} but content is the same",
-                        path, task_name
+                        "File {} timestamp changed for task {} but content is the same (time: {} -> {})",
+                        path, task_name, stored_modified_time, current_modified_time
                     );
                     // Update using the current file instance we already have
                     self.update_file_state_with_file(task_name, &current_file)
                         .await?;
                 }
 
+                debug!("File '{}' for task '{}' is unchanged", path, task_name);
                 Ok(false)
             }
             Err(e) => {
@@ -250,7 +275,6 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
-    use tokio::time::{sleep, Duration};
 
     #[sqlx::test]
     async fn test_task_cache_initialization() {
@@ -300,29 +324,15 @@ mod tests {
         // 2. Change content to guarantee hash changes
         // 3. Use multiple write operations to maximize chance of timestamp change
 
-        // Sleep to ensure clock advances, even on platforms with low timestamp resolution
-        sleep(Duration::from_millis(10)).await;
-
-        // First update with different content
+        // Modify file content and set mtime to ensure detection
         {
             let mut file = File::create(&file_path).unwrap();
-            file.write_all(b"modified content").unwrap();
+            file.write_all(b"modified content with more text").unwrap();
             file.sync_all().unwrap(); // Force flush to filesystem
-        }
 
-        // Sleep again to ensure timestamps can change
-        sleep(Duration::from_millis(10)).await;
-
-        // Second write to ensure modification time updates
-        {
-            // Append more content to guarantee content hash differs
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .append(true)
-                .open(&file_path)
-                .unwrap();
-            file.write_all(b" with more text").unwrap();
-            file.sync_all().unwrap();
+            // Set mtime to ensure it's different from original
+            let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+            file.set_modified(new_time).unwrap();
         }
 
         // Check should detect the modification
@@ -363,15 +373,16 @@ mod tests {
             .await
             .unwrap());
 
-        // Sleep to ensure clock advances
-        sleep(Duration::from_millis(10)).await;
-
         // Add a new file in the directory
         let file_path = dir_path.join("test_file.txt");
         {
             let mut file = File::create(&file_path).unwrap();
             file.write_all(b"new file content").unwrap();
             file.sync_all().unwrap();
+
+            // Set mtime to ensure directory modification is detected
+            let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+            file.set_modified(new_time).unwrap();
         }
 
         // Check should detect the directory modification
@@ -386,14 +397,15 @@ mod tests {
             .await
             .unwrap());
 
-        // Sleep to ensure clock advances
-        sleep(Duration::from_millis(10)).await;
-
         // Modify an existing file
         {
             let mut file = File::create(&file_path).unwrap();
             file.write_all(b"modified file content").unwrap();
             file.sync_all().unwrap();
+
+            // Set mtime to ensure directory modification is detected
+            let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+            file.set_modified(new_time).unwrap();
         }
 
         // Check should detect the directory modification
@@ -402,12 +414,16 @@ mod tests {
             .await
             .unwrap());
 
-        // Sleep to ensure clock advances
-        sleep(Duration::from_millis(10)).await;
-
-        // Create a subdirectory
+        // Create a subdirectory and set its mtime
         let subdir_path = dir_path.join("subdir");
         std::fs::create_dir(&subdir_path).unwrap();
+
+        // Set subdirectory mtime to ensure detection
+        let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(3);
+        std::fs::File::open(&subdir_path)
+            .unwrap()
+            .set_modified(new_time)
+            .unwrap();
 
         // Check should detect the directory modification
         assert!(cache
@@ -415,15 +431,16 @@ mod tests {
             .await
             .unwrap());
 
-        // Sleep to ensure clock advances
-        sleep(Duration::from_millis(10)).await;
-
         // Add a file in the subdirectory
         let subdir_file_path = subdir_path.join("nested_file.txt");
         {
             let mut file = File::create(&subdir_file_path).unwrap();
             file.write_all(b"nested file content").unwrap();
             file.sync_all().unwrap();
+
+            // Set mtime to ensure directory modification is detected
+            let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(4);
+            file.set_modified(new_time).unwrap();
         }
 
         // Check should detect the directory modification
@@ -458,15 +475,16 @@ mod tests {
             .await
             .unwrap());
 
-        // Sleep to ensure clock advances
-        sleep(Duration::from_millis(10)).await;
-
         // Add a file deep in the nested structure
         let deep_file_path = deep_dir3.join("deep_file.txt");
         {
             let mut file = File::create(&deep_file_path).unwrap();
             file.write_all(b"deep nested file content").unwrap();
             file.sync_all().unwrap();
+
+            // Set mtime to ensure directory modification is detected
+            let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+            file.set_modified(new_time).unwrap();
         }
 
         // Check should detect the deep file modification
@@ -475,18 +493,18 @@ mod tests {
             .await
             .unwrap());
 
-        // Sleep to ensure clock advances
-        sleep(Duration::from_millis(10)).await;
-
         // Update the deep file
         {
             let mut file = std::fs::OpenOptions::new()
-                .write(true)
                 .append(true)
                 .open(&deep_file_path)
                 .unwrap();
             file.write_all(b" with additional content").unwrap();
             file.sync_all().unwrap();
+
+            // Set mtime to ensure directory modification is detected
+            let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(6);
+            file.set_modified(new_time).unwrap();
         }
 
         // Check should detect the deep file update

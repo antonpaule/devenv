@@ -182,6 +182,8 @@ async fn main() -> Result<()> {
                     devenv-generate was not found in PATH
 
                     It was moved to a separate binary due to https://github.com/cachix/devenv/issues/1733
+
+                    For now, use the web version at https://devenv.new
                 "})
             }
         },
@@ -219,6 +221,7 @@ async fn main() -> Result<()> {
             config::write_json_schema().wrap_err("Failed to generate JSON schema")?;
             Ok(())
         }
+        Commands::Mcp {} => devenv::mcp::run_mcp_server(devenv.config).await,
         Commands::Direnvrc => unreachable!(),
         Commands::Version => unreachable!(),
     }

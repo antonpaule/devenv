@@ -3,7 +3,9 @@
 
 [comment]: # (Please add your documentation on top of this line)
 
-## services\.opensearch\.enable
+## Options
+
+### services\.opensearch\.enable
 
 Whether to enable OpenSearch\.
 
@@ -24,7 +26,7 @@ boolean
 
 
 
-## services\.opensearch\.package
+### services\.opensearch\.package
 
 
 
@@ -42,7 +44,7 @@ package
 
 
 
-## services\.opensearch\.extraCmdLineOptions
+### services\.opensearch\.extraCmdLineOptions
 
 
 
@@ -60,7 +62,7 @@ list of string
 
 
 
-## services\.opensearch\.extraJavaOptions
+### services\.opensearch\.extraJavaOptions
 
 
 
@@ -88,7 +90,7 @@ list of string
 
 
 
-## services\.opensearch\.logging
+### services\.opensearch\.logging
 
 
 
@@ -118,7 +120,7 @@ string
 
 
 
-## services\.opensearch\.settings
+### services\.opensearch\.settings
 
 
 
@@ -136,7 +138,7 @@ YAML value
 
 
 
-## services\.opensearch\.settings\."cluster\.name"
+### services\.opensearch\.settings\."cluster\.name"
 
 
 
@@ -154,7 +156,7 @@ string
 
 
 
-## services\.opensearch\.settings\."discovery\.type"
+### services\.opensearch\.settings\."discovery\.type"
 
 
 
@@ -172,7 +174,7 @@ string
 
 
 
-## services\.opensearch\.settings\."http\.port"
+### services\.opensearch\.settings\."http\.port"
 
 
 
@@ -190,7 +192,7 @@ The port to listen on for HTTP traffic\.
 
 
 
-## services\.opensearch\.settings\."network\.host"
+### services\.opensearch\.settings\."network\.host"
 
 
 
@@ -208,7 +210,28 @@ string
 
 
 
-## services\.opensearch\.settings\."transport\.port"
+### services\.opensearch\.settings\."plugins\.security\.disabled"
+
+
+
+Whether to disable the security plugin\. When set to false, SSL configuration is required\.
+To enable SSL, set ` plugins.security.ssl.transport.keystore_filepath ` or both
+` plugins.security.ssl.transport.server.pemcert_filepath ` and
+` plugins.security.ssl.transport.client.pemcert_filepath `\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
+
+
+
+### services\.opensearch\.settings\."transport\.port"
 
 
 

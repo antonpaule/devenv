@@ -2,12 +2,12 @@
 inputs:
   nixpkgs:
     url: github:NixOS/nixpkgs/nixpkgs-unstable
-  fenix:
-    url: github:nix-community/fenix
+  rust-overlay:
+    url: github:oxalica/rust-overlay
     inputs:
       nixpkgs:
         follows: nixpkgs
   nix:
-    url: github:domenkozar/nix/devenv-2.24
+    url: github:cachix/nix/devenv-2.30
   devenv:
     url: path:.?dir=src/modules
