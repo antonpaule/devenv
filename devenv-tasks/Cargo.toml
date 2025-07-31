@@ -5,22 +5,26 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+devenv-cache-core.workspace = true
+
 clap.workspace = true
 console.workspace = true
-eyre.workspace = true
 miette.workspace = true
 petgraph.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-util.workspace = true
 tracing.workspace = true
 sqlx.workspace = true
 blake3.workspace = true
-walkdir = "2.4.0"
-devenv-cache-core.workspace = true
+walkdir.workspace = true
 shell-escape.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

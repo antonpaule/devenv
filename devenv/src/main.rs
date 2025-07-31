@@ -3,12 +3,8 @@ use devenv::{
     cli::{Cli, Commands, ContainerCommand, InputsCommand, ProcessesCommand, TasksCommand},
     config, log, Devenv,
 };
-use miette::{IntoDiagnostic, Result, WrapErr};
-use std::env;
-use std::{
-    os::unix::process::CommandExt,
-    process::{self, Command},
-};
+use miette::{bail, IntoDiagnostic, Result, WrapErr};
+use std::{env, os::unix::process::CommandExt, process::Command};
 use tempfile::TempDir;
 use tracing::{info, warn};
 
@@ -100,13 +96,7 @@ async fn main() -> Result<()> {
 
     match command {
         Commands::Shell { cmd, ref args } => match cmd {
-            Some(cmd) => {
-                let output = devenv.exec_in_shell(cmd, args).await?;
-                if !output.status.success() {
-                    process::exit(output.status.code().unwrap_or(1));
-                }
-                Ok(())
-            }
+            Some(cmd) => devenv.exec_in_shell(Some(cmd), args).await,
             None => devenv.shell().await,
         },
         Commands::Test { .. } => devenv.test().await,
@@ -119,54 +109,59 @@ async fn main() -> Result<()> {
             command,
         } => {
             devenv.container_name = name.clone();
-            match name {
-                None => {
-                    if let Some(c) = command {
-                        match c {
-                            ContainerCommand::Build { name } => {
-                                devenv.container_name = Some(name.clone());
-                                let _ = devenv.container_build(&name).await?;
-                            }
-                            ContainerCommand::Copy { name } => {
-                                devenv.container_name = Some(name.clone());
-                                devenv
-                                    .container_copy(&name, &copy_args, registry.as_deref())
-                                    .await?;
-                            }
-                            ContainerCommand::Run { name } => {
-                                devenv.container_name = Some(name.clone());
-                                devenv
-                                    .container_run(&name, &copy_args, registry.as_deref())
-                                    .await?;
-                            }
-                        }
-                    }
+
+            // Backwards compatibility for the legacy container flags:
+            //   `devenv container <name> --copy` is now `devenv container copy <name>`
+            //   `devenv container <name> --docker-run` is now `devenv container run <name>`
+            //   `devenv container <name>` is now `devenv container build <name>`
+            let command = if let Some(name) = name {
+                if copy {
+                    warn!(
+                        devenv.is_user_message = true,
+                        "The --copy flag is deprecated. Use `devenv container copy` instead."
+                    );
+                    ContainerCommand::Copy { name }
+                } else if docker_run {
+                    warn!(
+                        devenv.is_user_message = true,
+                        "The --docker-run flag is deprecated. Use `devenv container run` instead."
+                    );
+                    ContainerCommand::Run { name }
+                } else {
+                    warn!(
+                        devenv.is_user_message = true,
+                        "Calling `devenv container` without a subcommand is deprecated. Use `devenv container build {name}` instead."
+                    );
+                    ContainerCommand::Build { name }
                 }
-                Some(name) => {
-                    match (copy, docker_run) {
-                        (true, false) => {
-                            warn!("--copy flag is deprecated, use `devenv container copy` instead",);
-                            devenv
-                                .container_copy(&name, &copy_args, registry.as_deref())
-                                .await?;
-                        }
-                        (_, true) => {
-                            warn!(
-                                "--docker-run flag is deprecated, use `devenv container run` instead",
-                            );
-                            devenv
-                                .container_run(&name, &copy_args, registry.as_deref())
-                                .await?;
-                        }
-                        _ => {
-                            warn!(
-                                "Calling without a subcommand is deprecated, use `devenv container build` instead"
-                            );
-                            let _ = devenv.container_build(&name).await?;
-                        }
-                    };
+            } else {
+                // Error out if we don't have a subcommand at this point.
+                if let Some(cmd) = command {
+                    cmd
+                } else {
+                    // Impossible. This handled by clap, but if we have no subcommand at this point, error out.
+                    bail!("No container subcommand provided. Use `devenv container build` or specify a command.")
                 }
             };
+
+            match command {
+                ContainerCommand::Build { name } => {
+                    let path = devenv.container_build(&name).await?;
+                    // Print the path to the built container to stdout
+                    println!("{path}");
+                }
+                ContainerCommand::Copy { name } => {
+                    devenv
+                        .container_copy(&name, &copy_args, registry.as_deref())
+                        .await?;
+                }
+                ContainerCommand::Run { name } => {
+                    devenv
+                        .container_run(&name, &copy_args, registry.as_deref())
+                        .await?;
+                }
+            }
+
             Ok(())
         }
         Commands::Init { target } => devenv.init(&target),
@@ -188,7 +183,7 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Search { name } => devenv.search(&name).await,
-        Commands::Gc {} => devenv.gc(),
+        Commands::Gc {} => devenv.gc().await,
         Commands::Info {} => devenv.info().await,
         Commands::Repl {} => devenv.repl().await,
         Commands::Build { attributes } => devenv.build(&attributes).await,
@@ -206,22 +201,30 @@ async fn main() -> Result<()> {
         }
         Commands::Processes {
             command: ProcessesCommand::Down {},
-        } => devenv.down(),
+        } => devenv.down().await,
         Commands::Tasks { command } => match command {
             TasksCommand::Run { tasks, mode } => devenv.tasks_run(tasks, mode).await,
+            TasksCommand::List {} => devenv.tasks_list().await,
         },
         Commands::Inputs { command } => match command {
-            InputsCommand::Add { name, url, follows } => devenv.inputs_add(&name, &url, &follows),
+            InputsCommand::Add { name, url, follows } => {
+                devenv.inputs_add(&name, &url, &follows).await
+            }
         },
 
         // hidden
         Commands::Assemble => devenv.assemble(false).await,
         Commands::PrintDevEnv { json } => devenv.print_dev_env(json).await,
         Commands::GenerateJSONSchema => {
-            config::write_json_schema().wrap_err("Failed to generate JSON schema")?;
+            config::write_json_schema()
+                .await
+                .wrap_err("Failed to generate JSON schema")?;
             Ok(())
         }
-        Commands::Mcp {} => devenv::mcp::run_mcp_server(devenv.config).await,
+        Commands::Mcp {} => {
+            let config = devenv.config.read().await.clone();
+            devenv::mcp::run_mcp_server(config).await
+        }
         Commands::Direnvrc => unreachable!(),
         Commands::Version => unreachable!(),
     }

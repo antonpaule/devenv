@@ -1,7 +1,7 @@
 use crate::config::TaskConfig;
 use crate::task_cache::TaskCache;
 use crate::types::{Output, Skipped, TaskCompleted, TaskFailure, TaskStatus, VerbosityLevel};
-use eyre::WrapErr;
+use miette::{Context, IntoDiagnostic, Result};
 use std::collections::BTreeMap;
 use std::process::Stdio;
 use tokio::fs::File;
@@ -9,6 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument};
 
 #[derive(Debug)]
@@ -16,14 +17,20 @@ pub struct TaskState {
     pub task: TaskConfig,
     pub status: TaskStatus,
     pub verbosity: VerbosityLevel,
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 impl TaskState {
-    pub fn new(task: TaskConfig, verbosity: VerbosityLevel) -> Self {
+    pub fn new(
+        task: TaskConfig,
+        verbosity: VerbosityLevel,
+        cancellation_token: Option<CancellationToken>,
+    ) -> Self {
         Self {
             task,
             status: TaskStatus::Pending,
             verbosity,
+            cancellation_token,
         }
     }
 
@@ -63,20 +70,29 @@ impl TaskState {
         &self,
         cmd: &str,
         outputs: &BTreeMap<String, serde_json::Value>,
-    ) -> eyre::Result<(Command, tempfile::NamedTempFile)> {
+    ) -> Result<(Command, tempfile::NamedTempFile)> {
         let mut command = Command::new(cmd);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        // Create a new process group for better signal handling
+        // This ensures that signals sent to the parent are propagated to all children
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
 
         // Set DEVENV_TASK_INPUTS
         if let Some(inputs) = &self.task.inputs {
             let inputs_json = serde_json::to_string(inputs)
-                .wrap_err("Failed to serialize task inputs to JSON")?;
+                .into_diagnostic()
+                .context("Failed to serialize task inputs to JSON")?;
             command.env("DEVENV_TASK_INPUT", inputs_json);
         }
 
         // Create a temporary file for DEVENV_TASK_OUTPUT_FILE
         let outputs_file = tempfile::NamedTempFile::new()
-            .wrap_err("Failed to create temporary file for task output")?;
+            .into_diagnostic()
+            .context("Failed to create temporary file for task output")?;
         command.env("DEVENV_TASK_OUTPUT_FILE", outputs_file.path());
 
         // Set environment variables from task outputs
@@ -101,8 +117,9 @@ impl TaskState {
         command.env("DEVENV_TASK_ENV", devenv_env);
 
         // Set DEVENV_TASKS_OUTPUTS
-        let outputs_json =
-            serde_json::to_string(outputs).wrap_err("Failed to serialize task outputs to JSON")?;
+        let outputs_json = serde_json::to_string(outputs)
+            .into_diagnostic()
+            .context("Failed to serialize task outputs to JSON")?;
         command.env("DEVENV_TASKS_OUTPUTS", outputs_json);
 
         Ok((command, outputs_file))
@@ -127,7 +144,7 @@ impl TaskState {
         now: Instant,
         outputs: &BTreeMap<String, serde_json::Value>,
         cache: &TaskCache,
-    ) -> eyre::Result<TaskCompleted> {
+    ) -> Result<TaskCompleted> {
         tracing::debug!(
             "Running task '{}' with exec_if_modified: {:?}, status: {}",
             self.task.name,
@@ -156,7 +173,7 @@ impl TaskState {
 
             let (mut command, _) = self
                 .prepare_command(cmd, outputs)
-                .wrap_err("Failed to prepare status command")?;
+                .context("Failed to prepare status command")?;
 
             // Use spawn and wait with output to properly handle status script execution
             match command.output().await {
@@ -232,11 +249,12 @@ impl TaskState {
         if let Some(cmd) = &self.task.command {
             let (mut command, outputs_file) = self
                 .prepare_command(cmd, outputs)
-                .wrap_err("Failed to prepare task command")?;
+                .context("Failed to prepare task command")?;
 
             let result = command
                 .spawn()
-                .wrap_err_with(|| format!("Failed to spawn command for {}", cmd));
+                .into_diagnostic()
+                .with_context(|| format!("Failed to spawn command for {}", cmd));
 
             let mut child = match result {
                 Ok(c) => c,
@@ -285,35 +303,83 @@ impl TaskState {
             let mut stdout_lines = Vec::new();
             let mut stderr_lines = Vec::new();
 
+            // Track EOF status for stdout and stderr streams
+            let mut stdout_closed = false;
+            let mut stderr_closed = false;
+
+            // Check if this is a process task (always show output for processes)
+            let is_process = self.task.name.starts_with("devenv:processes:");
+
             loop {
                 tokio::select! {
-                    result = stdout_reader.next_line() => {
+                    // Check for cancellation from shared signal handler
+                    _ = async {
+                        if let Some(ref token) = self.cancellation_token {
+                            token.cancelled().await
+                        } else {
+                            std::future::pending::<()>().await
+                        }
+                    } => {
+                        eprintln!("Task {} received shutdown signal, terminating child process", self.task.name);
+
+                        // Kill the child process and its process group
+                        #[cfg(unix)]
+                        if let Some(pid) = child.id() {
+                            use ::nix::sys::signal::{self, Signal};
+                            use ::nix::unistd::Pid;
+
+                            // Send SIGTERM to the process group first for graceful shutdown
+                            let _ = signal::killpg(Pid::from_raw(pid as i32), Signal::SIGTERM);
+
+                            // Wait a bit for graceful shutdown
+                            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                            if child.try_wait().unwrap_or(None).is_none() {
+                                // Force kill if still running
+                                let _ = signal::killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                            }
+                        }
+
+                        #[cfg(not(unix))]
+                        {
+                            // On non-Unix systems, try to kill the child process directly
+                            let _ = child.kill().await;
+                        }
+
+                        return Ok(TaskCompleted::Cancelled(now.elapsed()));
+                    }
+                    result = stdout_reader.next_line(), if !stdout_closed => {
                         match result {
                             Ok(Some(line)) => {
-                                if self.verbosity == VerbosityLevel::Verbose {
+                                if self.verbosity == VerbosityLevel::Verbose || is_process {
                                     eprintln!("[{}] {}", self.task.name, line);
                                 }
                                 stdout_lines.push((std::time::Instant::now(), line));
                             },
-                            Ok(None) => {},
+                            Ok(None) => {
+                                stdout_closed = true;
+                            },
                             Err(e) => {
                                 error!("Error reading stdout: {}", e);
                                 stderr_lines.push((std::time::Instant::now(), e.to_string()));
+                                stdout_closed = true;
                             },
                         }
                     }
-                    result = stderr_reader.next_line() => {
+                    result = stderr_reader.next_line(), if !stderr_closed => {
                         match result {
                             Ok(Some(line)) => {
-                                if self.verbosity == VerbosityLevel::Verbose {
+                                if self.verbosity == VerbosityLevel::Verbose || is_process {
                                     eprintln!("[{}] {}", self.task.name, line);
                                 }
                                 stderr_lines.push((std::time::Instant::now(), line));
                             },
-                            Ok(None) => {},
+                            Ok(None) => {
+                                stderr_closed = true;
+                            },
                             Err(e) => {
                                 error!("Error reading stderr: {}", e);
                                 stderr_lines.push((std::time::Instant::now(), e.to_string()));
+                                stderr_closed = true;
                             },
                         }
                     }

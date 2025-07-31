@@ -1,15 +1,9 @@
-FROM nixos/nix:latest@sha256:3bb728719e2c4e478df4c50b80f93adbe27d5c561d1417c3a2306eb914d910da
+FROM nixpkgs/nix:latest
 
-ARG CACHIX_VERSION=v1
 ARG DEVENV_VERSION=latest
 
 # https://github.com/NixOS/nix/issues/5258
-RUN echo "filter-syscalls = false" >> /etc/nix/nix.conf
+RUN mkdir /etc/nix && echo "filter-syscalls = false" >> /etc/nix/nix.conf
 
-# Use devenv cache for faster installation
-RUN nix-env -iA cachix -f https://cachix.org/api/$CACHIX_VERSION/install && cachix use devenv
-
-RUN nix-env -if https://github.com/cachix/devenv/tarball/$DEVENV_VERSION
-
-# Remove devenv cache and cachix for cleaner image
-RUN cachix remove devenv && nix-env -e cachix
+RUN nix profile install -j1 github:cachix/devenv/$DEVENV_VERSION nixpkgs#gnugrep --extra-experimental-features 'flakes nix-command' --accept-flake-config && nix-collect-garbage -d && rm -rf /root/.cache
+ENV PATH="/root/.nix-profile/bin:${PATH}"

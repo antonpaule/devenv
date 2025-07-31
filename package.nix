@@ -6,6 +6,7 @@
 , nix
 , cachix ? null
 , openssl
+, dbus
 , apple-sdk_11
 , protobuf
 , pkg-config
@@ -60,8 +61,11 @@ rustPlatform.buildRustPackage {
     protobuf
   ];
 
-  buildInputs = [ openssl ]
-    ++ lib.optional stdenv.isDarwin apple-sdk_11;
+  buildInputs = [
+    openssl
+  ] ++ lib.optional stdenv.isDarwin apple-sdk_11
+  # secretspec
+  ++ lib.optional (!stdenv.isDarwin) dbus;
 
   # Fix proto files for snix dependencies
   preBuild = ''

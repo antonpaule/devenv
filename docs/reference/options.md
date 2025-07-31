@@ -1021,6 +1021,584 @@ list of string
 
 
 
+## claude.code.enable
+
+
+
+Whether to enable Claude Code integration with automatic hooks and commands setup.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+
+
+*Example:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.agents
+
+
+
+Custom Claude Code sub-agents to create in the project.
+Sub-agents are specialized AI assistants that handle specific tasks
+with their own context window and can be invoked automatically or explicitly.
+
+For more details, see: https://docs.anthropic.com/en/docs/claude-code/sub-agents
+
+
+
+*Type:*
+attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+```
+{
+  code-reviewer = {
+    description = "Expert code review specialist that checks for quality, security, and best practices";
+    proactive = true;
+    tools = [ "Read" "Grep" "TodoWrite" ];
+    prompt = ''
+      You are an expert code reviewer. When reviewing code, check for:
+      - Code readability and maintainability
+      - Proper error handling
+      - Security vulnerabilities
+      - Performance issues
+      - Adherence to project conventions
+      
+      Provide constructive feedback with specific suggestions for improvement.
+    '';
+  };
+  
+  test-writer = {
+    description = "Specialized in writing comprehensive test suites";
+    proactive = false;
+    tools = [ "Read" "Write" "Edit" "Bash" ];
+    prompt = ''
+      You are a test writing specialist. Create comprehensive test suites that:
+      - Cover edge cases and error conditions
+      - Follow the project's testing conventions
+      - Include unit, integration, and property-based tests where appropriate
+      - Have clear test names that describe what is being tested
+    '';
+  };
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.agents.\<name>.description
+
+
+
+What the sub-agent does
+
+
+
+*Type:*
+string
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.agents.\<name>.proactive
+
+
+
+Whether Claude should use this sub-agent automatically
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.agents.\<name>.prompt
+
+
+
+The system prompt for the sub-agent
+
+
+
+*Type:*
+strings concatenated with “\\n”
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.agents.\<name>.tools
+
+
+
+List of allowed tools for this sub-agent
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.apiKeyHelper
+
+
+
+Custom script for generating authentication tokens.
+The script should output the API key to stdout.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+` null `
+
+
+
+*Example:*
+` "aws secretsmanager get-secret-value --secret-id claude-api-key | jq -r .SecretString" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.cleanupPeriodDays
+
+
+
+Retention period for chat transcripts in days.
+
+
+
+*Type:*
+null or signed integer
+
+
+
+*Default:*
+` null `
+
+
+
+*Example:*
+` 30 `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.commands
+
+
+
+Custom Claude Code slash commands to create in the project.
+Commands are invoked with ` /command-name ` in Claude Code.
+
+
+
+*Type:*
+attribute set of string
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+``````
+{
+  test = ''
+    Run all tests in the project
+
+    ```bash
+    cargo test
+    ```
+  '';
+  fmt = ''
+    Format all code in the project
+
+    ```bash
+    cargo fmt
+    nixfmt **/*.nix
+    ```
+  '';
+}
+
+``````
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.env
+
+
+
+Custom environment variables for Claude Code sessions.
+
+
+
+*Type:*
+attribute set of string
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+```
+{
+  NODE_ENV = "development";
+  PYTHONPATH = "/custom/python/path";
+}
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.forceLoginMethod
+
+
+
+Restrict the login method to either browser or API key authentication.
+
+
+
+*Type:*
+null or one of “browser”, “api-key”
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.hooks
+
+
+
+Hooks that run at different points in Claude Code’s workflow.
+
+
+
+*Type:*
+attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+```
+{
+  protect-secrets = {
+    enable = true;
+    name = "Protect sensitive files";
+    hookType = "PreToolUse";
+    matcher = "^(Edit|MultiEdit|Write)$";
+    command = ''
+      json=$(cat);
+      file_path = $(echo "$json" | jq - r '.file_path // empty');
+      grep -q 'SECRET\\|PASSWORD\\|API_KEY' "$file_path" && echo 'Blocked: sensitive data detected' && exit 1 || exit 0
+    '';
+  };
+  run-tests = {
+    enable = true;
+    name = "Run tests after edit";
+    hookType = "PostToolUse";
+    matcher = "^(Edit|MultiEdit|Write)$";
+    command = "cargo test";
+  };
+  log-completion = {
+    enable = true;
+    name = "Log when Claude finishes";
+    hookType = "Stop";
+    command = "echo 'Claude finished responding' >> claude.log";
+  };
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.hooks.\<name>.enable
+
+
+
+Whether to enable this hook.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.hooks.\<name>.command
+
+
+
+The command to execute.
+
+
+
+*Type:*
+string
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.hooks.\<name>.hookType
+
+
+
+The type of hook:
+
+ - PreToolUse: Runs before tool calls (can block them)
+ - PostToolUse: Runs after tool calls complete
+ - Notification: Runs when Claude Code sends notifications
+ - Stop: Runs when Claude Code finishes responding
+ - SubagentStop: Runs when subagent tasks complete
+
+
+
+*Type:*
+one of “PreToolUse”, “PostToolUse”, “Notification”, “Stop”, “SubagentStop”
+
+
+
+*Default:*
+` "PostToolUse" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.hooks.\<name>.matcher
+
+
+
+Regex pattern to match against tool names (for PreToolUse/PostToolUse hooks).
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.hooks.\<name>.name
+
+
+
+The name of the hook (appears in logs).
+
+
+
+*Type:*
+string
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.model
+
+
+
+Override the default Claude model.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+` null `
+
+
+
+*Example:*
+` "claude-3-opus-20240229" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.permissions
+
+
+
+Fine-grained permissions for tool usage.
+Can specify allow/deny rules for different tools.
+
+
+
+*Type:*
+attribute set of (submodule)
+
+
+
+*Default:*
+` { } `
+
+
+
+*Example:*
+
+```
+{
+  Edit = {
+    deny = [ "*.secret" "*.env" ];
+  };
+  Bash = {
+    deny = [ "rm -rf" ];
+  };
+}
+
+```
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.permissions.\<name>.allow
+
+
+
+List of allowed tools or patterns.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
+## claude.code.permissions.\<name>.deny
+
+
+
+List of denied tools or patterns.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ ] `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/claude.nix)
+
+
+
 ## container.isBuilding
 
 
@@ -1842,7 +2420,7 @@ string
 
 
 *Default:*
-` "1.7" `
+` "1.8.1" `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/update-check.nix](https://github.com/cachix/devenv/blob/main/src/modules/update-check.nix)
@@ -1850,8 +2428,6 @@ string
 
 
 ## devenv.warnOnNewVersion
-
-
 
 Whether to warn when a new version of either devenv or the direnv integration is available.
 
@@ -2330,6 +2906,8 @@ list of (one of “commit-msg”, “post-checkout”, “post-commit”, “pos
 
 
 ## git-hooks.excludes
+
+
 
 Exclude files that were matched by these patterns.
 
@@ -3014,6 +3592,18 @@ format typst
 **` typstyle `**
 
 Beautiful and reliable typst code formatter
+
+**` uv-check `**
+
+Check if uv’s lockfile is up-to-date.
+
+**` uv-export `**
+
+Export uv’s lockfile.
+
+**` uv-lock `**
+
+Update uv’s lockfile.
 
 **` vale `**
 
@@ -4660,8 +5250,6 @@ list of string
 
 ## git-hooks.hooks.deadnix.settings.hidden
 
-
-
 Recurse into hidden subdirectories and process hidden .\*.nix files.
 
 
@@ -5101,6 +5689,8 @@ boolean
 
 
 ## git-hooks.hooks.eclint.description
+
+
 
 Description of the hook. Used for metadata purposes only.
 
@@ -6718,8 +7308,6 @@ boolean
 
 ## git-hooks.hooks.mdl.description
 
-
-
 Description of the hook. Used for metadata purposes only.
 
 
@@ -7136,6 +7724,8 @@ one of “get”, “head”
 
 
 ## git-hooks.hooks.mkdocs-linkcheck.settings.path
+
+
 
 Path to check
 
@@ -11011,6 +11601,133 @@ boolean
 
 
 
+## git-hooks.hooks.uv-export
+
+
+
+uv export hook
+
+
+
+*Type:*
+submodule
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.uv-export.enable
+
+
+
+Whether to enable this pre-commit hook.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.uv-export.description
+
+
+
+Description of the hook. Used for metadata purposes only.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hook.nix)
+
+
+
+## git-hooks.hooks.uv-export.settings.flags
+
+
+
+Flags passed to ` uv export `
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.uv-export.settings.format
+
+
+
+Output format of the project’s lockfile.
+
+
+
+*Type:*
+one of “requirements.txt”, “pylock.toml”
+
+
+
+*Default:*
+` "pylock.toml" `
+
+
+
+*Example:*
+` "requirements.txt" `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
+## git-hooks.hooks.uv-export.settings.locked
+
+
+
+Assert that the ` uv.lock ` will remain unchanged.
+Requires that the lockfile is up-to-date. If the lockfile is missing or needs to be updated, uv will exit with an error.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix](https://github.com/cachix/git-hooks.nix/blob/master/modules/hooks.nix)
+
+
+
 ## git-hooks.hooks.vale
 
 
@@ -12442,21 +13159,64 @@ null or package
 
 
 
-## languages.haskell.stack
+## languages.haskell.stack.enable
 
 
 
-Haskell stack to use.
+Whether to enable the Haskell Stack
 
 
 
 *Type:*
-null or package
+boolean
+
+
+
+*Default:*
+` true `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/haskell.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/haskell.nix)
+
+
+
+## languages.haskell.stack.package
+
+
+
+Haskell stack package to use.
+
+
+
+*Type:*
+package
 
 
 
 *Default:*
 ` pkgs.stack `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/haskell.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/haskell.nix)
+
+
+
+## languages.haskell.stack.args
+
+
+
+Additional arguments to pass to stack.
+By default, stack is configured to use devenv’s GHC installation.
+
+
+
+*Type:*
+list of string
+
+
+
+*Default:*
+` [ "--no-nix" "--system-ghc" "--no-install-ghc" ] `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/languages/haskell.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/haskell.nix)
@@ -15320,9 +16080,10 @@ list of string
 
 
 
-Enable mold as the linker.
+Use [mold](https://github.com/rui314/mold) as the linker.
 
-Enabled by default on x86_64 Linux machines when no cross-compilation targets are specified.
+mold is a faster drop-in replacement for existing Unix linkers.
+It is several times quicker than the LLVM lld linker.
 
 
 
@@ -15332,7 +16093,7 @@ boolean
 
 
 *Default:*
-` pkgs.stdenv.isLinux && pkgs.stdenv.isx86_64 && languages.rust.targets == [ ] `
+` false `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix)
@@ -15502,6 +16263,23 @@ null or package
 
 *Default:*
 ` pkgs.rustfmt `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix)
+
+
+
+## languages.rust.toolchainPackage
+
+
+
+The aggregated toolchain package, which includes the configured components and targets.
+This is automatically set based on the channel and components configuration.
+
+
+
+*Type:*
+package
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix](https://github.com/cachix/devenv/blob/main/src/modules/languages/rust.nix)
@@ -16982,6 +17760,90 @@ string
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/scripts.nix](https://github.com/cachix/devenv/blob/main/src/modules/scripts.nix)
+
+
+
+## secretspec.enable
+
+
+
+Whether secretspec integration is enabled (automatically true when secrets are loaded)
+
+
+
+*Type:*
+boolean *(read only)*
+
+
+
+*Default:*
+` false `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix)
+
+
+
+## secretspec.profile
+
+
+
+The secretspec profile that was used to load secrets (read-only)
+
+
+
+*Type:*
+null or string *(read only)*
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix)
+
+
+
+## secretspec.provider
+
+
+
+The secretspec provider that was used to load secrets (read-only)
+
+
+
+*Type:*
+null or string *(read only)*
+
+
+
+*Default:*
+` null `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix)
+
+
+
+## secretspec.secrets
+
+
+
+Secrets loaded from secretspec.toml (read-only)
+
+
+
+*Type:*
+attribute set of string *(read only)*
+
+
+
+*Default:*
+` { } `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix](https://github.com/cachix/devenv/blob/main/src/modules/integrations/secretspec.nix)
 
 
 
@@ -21041,6 +21903,27 @@ attribute set of string
 
 
 
+## services.mysql.ensureUsers.\*.host
+
+
+
+Host of the user to ensure.
+
+
+
+*Type:*
+string
+
+
+
+*Default:*
+` "localhost" `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/services/mysql.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/mysql.nix)
+
+
+
 ## services.mysql.ensureUsers.\*.name
 
 
@@ -24948,7 +25831,9 @@ package
 
 
 
-List of tasks to run after this task.
+List of tasks that must complete before this task runs.
+
+Here’s a helpful mnemonic to remember: This task runs *after* these tasks.
 
 
 
@@ -24969,7 +25854,9 @@ list of string
 
 
 
-List of tasks to run before this task.
+List of tasks that depend on this task completing first.
+
+Here’s a helpful mnemonic to remember: This task runs *before* these tasks.
 
 
 

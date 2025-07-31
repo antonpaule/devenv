@@ -22,6 +22,7 @@ console.workspace = true
 dialoguer.workspace = true
 dotlock.workspace = true
 fd-lock.workspace = true
+futures.workspace = true
 hex.workspace = true
 include_dir.workspace = true
 indoc.workspace = true
@@ -41,6 +42,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-core.workspace = true
 tracing-subscriber.workspace = true
+tracing-indicatif.workspace = true
+indicatif.workspace = true
 which.workspace = true
 whoami.workspace = true
 xdg.workspace = true
@@ -50,6 +53,7 @@ shell-escape.workspace = true
 rmcp.workspace = true
 rmcp-macros.workspace = true
 async-trait.workspace = true
+secretspec = "0.2.0"
 
 # Optional snix dependencies
 snix-eval = { git = "https://github.com/cachix/snix", optional = true }
@@ -63,4 +67,4 @@ nix-compat-derive = { git = "https://github.com/cachix/snix", optional = true }
 [features]
 default = []
 integration-tests = []
-snix = ["snix-eval", "snix-glue", "snix-castore", "snix-store", "snix-build"]
+snix = ["dep:snix-eval", "dep:snix-glue", "dep:snix-castore", "dep:snix-store", "dep:snix-build", "dep:nix-compat", "dep:nix-compat-derive"]

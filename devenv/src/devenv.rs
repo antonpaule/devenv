@@ -5,19 +5,26 @@ use clap::crate_version;
 use cli_table::Table;
 use cli_table::{print_stderr, WithTitle};
 use include_dir::{include_dir, Dir};
-use miette::{bail, Context, IntoDiagnostic, Result};
+use miette::{bail, miette, Context, IntoDiagnostic, Result};
 use once_cell::sync::Lazy;
+use secretspec;
 use serde::Deserialize;
+use serde_json;
 use sha2::Digest;
 use similar::{ChangeTag, TextDiff};
-use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader, Write};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
-use std::{
-    fs::{self, File},
-    path::{Path, PathBuf},
-    process,
+use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
+use tokio::fs::{self, File};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process;
+use tokio::sync::{OnceCell, RwLock, Semaphore};
 use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
 
 // templates
@@ -41,7 +48,7 @@ pub static DIRENVRC_VERSION: Lazy<u8> = Lazy::new(|| {
         .unwrap_or(0)
 });
 // project vars
-const DEVENV_FLAKE: &str = ".devenv.flake.nix";
+pub(crate) const DEVENV_FLAKE: &str = ".devenv.flake.nix";
 
 #[derive(Default, Debug)]
 pub struct DevenvOptions {
@@ -63,10 +70,10 @@ pub struct ProcessOptions<'a> {
 }
 
 pub struct Devenv {
-    pub config: config::Config,
+    pub config: Arc<RwLock<config::Config>>,
     pub global_options: cli::GlobalOptions,
 
-    pub nix: Box<dyn nix_backend::NixBackend>,
+    pub nix: Arc<Box<dyn nix_backend::NixBackend>>,
 
     // All kinds of paths
     devenv_root: PathBuf,
@@ -76,8 +83,16 @@ pub struct Devenv {
     devenv_tmp: String,
     devenv_runtime: PathBuf,
 
-    assembled: bool,
-    has_processes: Option<bool>,
+    // Whether assemble has been run.
+    // Assemble creates critical runtime directories and files.
+    assembled: Arc<AtomicBool>,
+    // Semaphore to prevent multiple concurrent assembles
+    assemble_lock: Arc<Semaphore>,
+
+    has_processes: Arc<OnceCell<bool>>,
+
+    // Secretspec resolved data to pass to Nix
+    secretspec_resolved: Arc<OnceCell<secretspec::Resolved<HashMap<String, String>>>>,
 
     // TODO: make private.
     // Pass as an arg or have a setter.
@@ -118,7 +133,8 @@ impl Devenv {
         xdg_dirs
             .create_data_directory(Path::new("devenv"))
             .expect("Failed to create DEVENV_HOME directory");
-        std::fs::create_dir_all(&devenv_home_gc)
+        tokio::fs::create_dir_all(&devenv_home_gc)
+            .await
             .expect("Failed to create DEVENV_HOME_GC directory");
 
         // Determine backend type from config
@@ -133,11 +149,19 @@ impl Devenv {
             cachix_trusted_keys,
         };
 
+        // Create shared secretspec_resolved Arc to share between Devenv and Nix
+        let secretspec_resolved = Arc::new(OnceCell::new());
+
         let nix: Box<dyn nix_backend::NixBackend> = match backend_type {
             config::NixBackendType::Nix => Box::new(
-                crate::nix::Nix::new(options.config.clone(), global_options.clone(), paths)
-                    .await
-                    .expect("Failed to initialize Nix backend"),
+                crate::nix::Nix::new(
+                    options.config.clone(),
+                    global_options.clone(),
+                    paths,
+                    secretspec_resolved.clone(),
+                )
+                .await
+                .expect("Failed to initialize Nix backend"),
             ),
             #[cfg(feature = "snix")]
             config::NixBackendType::Snix => Box::new(
@@ -152,7 +176,7 @@ impl Devenv {
         };
 
         Self {
-            config: options.config,
+            config: Arc::new(RwLock::new(options.config)),
             global_options,
             devenv_root,
             devenv_dotfile,
@@ -160,9 +184,11 @@ impl Devenv {
             devenv_home_gc,
             devenv_tmp,
             devenv_runtime,
-            nix,
-            assembled: false,
-            has_processes: None,
+            nix: Arc::new(nix),
+            assembled: Arc::new(AtomicBool::new(false)),
+            assemble_lock: Arc::new(Semaphore::new(1)),
+            has_processes: Arc::new(OnceCell::new()),
+            secretspec_resolved,
             container_name: None,
         }
     }
@@ -176,9 +202,9 @@ impl Devenv {
     }
 
     pub fn init(&self, target: &Option<PathBuf>) -> Result<()> {
-        let target = target
-            .clone()
-            .unwrap_or_else(|| fs::canonicalize(".").expect("Failed to get current directory"));
+        let target = target.clone().unwrap_or_else(|| {
+            std::fs::canonicalize(".").expect("Failed to get current directory")
+        });
 
         // create directory target if not exists
         if !target.exists() {
@@ -222,20 +248,23 @@ impl Devenv {
         };
 
         // run direnv allow
-        let _ = std::process::Command::new(direnv)
+        let _ = process::Command::new(direnv)
             .arg("allow")
             .current_dir(&target)
-            .exec();
+            .spawn();
         Ok(())
     }
 
-    pub fn inputs_add(&mut self, name: &str, url: &str, follows: &[String]) -> Result<()> {
-        self.config.add_input(name, url, follows)?;
-        self.config.write()?;
+    pub async fn inputs_add(&self, name: &str, url: &str, follows: &[String]) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            config.add_input(name, url, follows)?;
+            config.write().await?;
+        }
         Ok(())
     }
 
-    pub async fn print_dev_env(&mut self, json: bool) -> Result<()> {
+    pub async fn print_dev_env(&self, json: bool) -> Result<()> {
         let env = self.get_dev_environment(json).await?;
         print!(
             "{}",
@@ -245,7 +274,7 @@ impl Devenv {
     }
 
     // TODO: fetch bash from the module system
-    async fn get_bash(&mut self, refresh_cached_output: bool) -> Result<String> {
+    async fn get_bash(&self, refresh_cached_output: bool) -> Result<String> {
         let options = nix_backend::Options {
             cache_output: true,
             refresh_cached_output,
@@ -284,10 +313,10 @@ impl Devenv {
 
     #[instrument(skip(self))]
     pub async fn prepare_shell(
-        &mut self,
+        &self,
         cmd: &Option<String>,
         args: &[String],
-    ) -> Result<std::process::Command> {
+    ) -> Result<process::Command> {
         let DevEnv { output, .. } = self.get_dev_environment(false).await?;
 
         let bash = match self.get_bash(false).await {
@@ -298,7 +327,7 @@ impl Devenv {
             Ok(bash) => bash,
         };
 
-        let mut shell_cmd = std::process::Command::new(&bash);
+        let mut shell_cmd = process::Command::new(&bash);
         let path = self.devenv_runtime.join("shell");
 
         // Load the user's bashrc if it exists and if we're in an interactive shell.
@@ -344,7 +373,7 @@ impl Devenv {
             .await
             .expect("Failed to set permissions");
 
-        let config_clean = self.config.clean.clone().unwrap_or_default();
+        let config_clean = self.config.read().await.clean.clone().unwrap_or_default();
         if self.global_options.clean.is_some() || config_clean.enabled {
             let keep = match &self.global_options.clean {
                 Some(clean) => clean,
@@ -365,34 +394,56 @@ impl Devenv {
         Ok(shell_cmd)
     }
 
-    pub async fn shell(mut self) -> Result<()> {
-        let mut shell_cmd = self.prepare_shell(&None, &[]).await?;
-        let span = info_span!("entering_shell", devenv.user_message = "Entering shell",);
-        let _ = shell_cmd.exec().instrument(span);
-        Ok(())
+    /// Launch an interactive shell (uses exec, never returns).
+    pub async fn shell(&self) -> Result<()> {
+        self.exec_in_shell(None, &[]).await
     }
 
-    pub async fn exec_in_shell(
-        &mut self,
-        cmd: String,
-        args: &[String],
-    ) -> Result<std::process::Output> {
+    /// Execute a command by replacing the current process using exec.
+    ///
+    /// This method accepts `Option<String>` for the command to support both:
+    /// - Interactive shell: `exec_in_shell(None, &[])`
+    /// - Command execution: `exec_in_shell(Some(cmd), args)`
+    ///
+    /// **Important**: This function never returns `Ok(())` on success because `exec()`
+    /// replaces the current process. The `Result<()>` return type only represents
+    /// potential errors during setup or if `exec()` fails to start the new process.
+    /// On successful exec, this function never returns.
+    pub async fn exec_in_shell(&self, cmd: Option<String>, args: &[String]) -> Result<()> {
+        let shell_cmd = self.prepare_shell(&cmd, args).await?;
+        info!(devenv.is_user_message = true, "Entering shell");
+        let err = shell_cmd.into_std().exec();
+
+        let cmd_context = match &cmd {
+            Some(c) => format!("command '{}'", c),
+            None => "interactive shell".to_string(),
+        };
+        bail!("Failed to exec into shell with {}: {}", cmd_context, err);
+    }
+
+    /// Run a command and return the output.
+    ///
+    /// This method accepts `String` (not `Option<String>`) because it's specifically
+    /// designed for running commands and capturing their output. Unlike `exec_in_shell`,
+    /// this method always requires a command and uses `spawn` + `wait_with_output`
+    /// to return control to the caller with the command's output.
+    pub async fn run_in_shell(&self, cmd: String, args: &[String]) -> Result<Output> {
         let mut shell_cmd = self.prepare_shell(&Some(cmd), args).await?;
-        let span = info_span!(
-            "executing_in_shell",
-            devenv.user_message = "Executing in shell"
-        );
-        span.in_scope(|| {
-            shell_cmd
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .output()
-                .into_diagnostic()
-        })
+        let span = info_span!("running_in_shell", devenv.user_message = "Running in shell");
+        // Note that tokio's `output()` always configures stdout/stderr as pipes.
+        // Use `spawn` + `wait_with_output` instead.
+        let proc = shell_cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .into_diagnostic()?;
+        async move { proc.wait_with_output().await.into_diagnostic() }
+            .instrument(span)
+            .await
     }
 
-    pub async fn update(&mut self, input_name: &Option<String>) -> Result<()> {
+    pub async fn update(&self, input_name: &Option<String>) -> Result<()> {
         self.assemble(false).await?;
 
         let msg = match input_name {
@@ -406,55 +457,59 @@ impl Devenv {
         Ok(())
     }
 
-    pub async fn container_build(&mut self, name: &str) -> Result<String> {
+    #[instrument(
+        name = "building_container",
+        skip(self),
+        fields(devenv.user_message = format!("Building {name} container"))
+    )]
+    pub async fn container_build(&self, name: &str) -> Result<String> {
         if cfg!(target_os = "macos") {
             bail!(
                 "Containers are not supported on macOS yet: https://github.com/cachix/devenv/issues/430"
             );
         }
 
-        let span = info_span!(
-            "building_container",
-            devenv.user_message = format!("Building {name} container")
-        );
+        self.assemble(false).await?;
 
-        async move {
-            self.assemble(false).await?;
-
-            let container_store_path = self
-                .nix
-                .build(&[&format!("devenv.containers.{name}.derivation")], None)
-                .await?;
-            let container_store_path = container_store_path[0]
-                .to_str()
-                .expect("Failed to get container store path");
-            println!("{}", &container_store_path);
-            Ok(container_store_path.to_string())
-        }
-        .instrument(span)
-        .await
+        let sanitized_name = sanitize_container_name(name);
+        let gc_root = self
+            .devenv_dot_gc
+            .join(format!("container-{sanitized_name}-derivation"));
+        let paths = self
+            .nix
+            .build(
+                &[&format!("devenv.containers.{name}.derivation")],
+                None,
+                Some(&gc_root),
+            )
+            .await?;
+        let container_store_path = &paths[0].to_string_lossy();
+        Ok(container_store_path.to_string())
     }
 
     pub async fn container_copy(
-        &mut self,
+        &self,
         name: &str,
         copy_args: &[String],
         registry: Option<&str>,
     ) -> Result<()> {
         let spec = self.container_build(name).await?;
 
-        // TODO: No newline
-        let span = info_span!(
-            "copying_container",
-            devenv.user_message = format!("Copying {name} container")
-        );
-
+        let span = info_span!("copying_container");
         async move {
-            let copy_script = self
+            let sanitized_name = sanitize_container_name(name);
+            let gc_root = self
+                .devenv_dot_gc
+                .join(format!("container-{sanitized_name}-copy"));
+            let paths = self
                 .nix
-                .build(&[&format!("devenv.containers.{name}.copyScript")], None)
+                .build(
+                    &[&format!("devenv.containers.{name}.copyScript")],
+                    None,
+                    Some(&gc_root),
+                )
                 .await?;
-            let copy_script = &copy_script[0];
+            let copy_script = &paths[0];
             let copy_script_string = &copy_script.to_string_lossy();
 
             let base_args = [spec, registry.unwrap_or("false").to_string()];
@@ -463,13 +518,14 @@ impl Devenv {
                 .chain(copy_args.iter().map(|s| s.to_string()))
                 .collect();
 
-            info!("Running {copy_script_string} {}", command_args.join(" "));
+            debug!("Running {copy_script_string} {}", command_args.join(" "));
 
-            let status = std::process::Command::new(copy_script)
+            let status = process::Command::new(copy_script)
                 .args(command_args)
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
                 .status()
+                .await
                 .expect("Failed to run copy script");
 
             if !status.success() {
@@ -483,7 +539,7 @@ impl Devenv {
     }
 
     pub async fn container_run(
-        &mut self,
+        &self,
         name: &str,
         copy_args: &[String],
         registry: Option<&str>,
@@ -494,37 +550,33 @@ impl Devenv {
         self.container_copy(name, copy_args, Some("docker-daemon:"))
             .await?;
 
-        let span = info_span!(
-            "running_container",
-            devenv.user_message = format!("Running {name} container")
-        );
+        info!(devenv.is_user_message = true, "Running container {name}",);
 
-        async move {
-            let run_script = self
-                .nix
-                .build(&[&format!("devenv.containers.{name}.dockerRun")], None)
-                .await?;
+        let sanitized_name = sanitize_container_name(name);
+        let gc_root = self
+            .devenv_dot_gc
+            .join(format!("container-{sanitized_name}-run"));
+        let paths = self
+            .nix
+            .build(
+                &[&format!("devenv.containers.{name}.dockerRun")],
+                None,
+                Some(&gc_root),
+            )
+            .await?;
 
-            let status = std::process::Command::new(&run_script[0])
-                .status()
-                .expect("Failed to run container script");
+        let err = process::Command::new(&paths[0]).into_std().exec();
 
-            if !status.success() {
-                bail!("Failed to run container")
-            } else {
-                Ok(())
-            }
-        }
-        .instrument(span)
-        .await
+        // If exec fails, we return an error.
+        bail!("Failed to run container: {}", err);
     }
 
-    pub async fn repl(&mut self) -> Result<()> {
+    pub async fn repl(&self) -> Result<()> {
         self.assemble(false).await?;
-        self.nix.repl()
+        self.nix.repl().await
     }
 
-    pub fn gc(&mut self) -> Result<()> {
+    pub async fn gc(&self) -> Result<()> {
         let start = std::time::Instant::now();
 
         let (to_gc, removed_symlinks) = {
@@ -555,7 +607,7 @@ impl Devenv {
             info!(
                 "If you'd like this to run faster, leave a thumbs up at https://github.com/NixOS/nix/issues/7239"
             );
-            span.in_scope(|| self.nix.gc(to_gc))?;
+            self.nix.gc(to_gc).instrument(span).await?;
         }
 
         let (after_gc, _) = cleanup_symlinks(&self.devenv_home_gc);
@@ -570,9 +622,37 @@ impl Devenv {
         Ok(())
     }
 
-    pub async fn search(&mut self, name: &str) -> Result<()> {
+    #[instrument(
+        skip(self),
+        fields(
+            devenv.user_message = "Searching options and packages",
+        )
+    )]
+    pub async fn search(&self, name: &str) -> Result<()> {
         self.assemble(false).await?;
 
+        // Run both searches concurrently
+        let (options_results, package_results) =
+            tokio::try_join!(self.search_options(name), self.search_packages(name))?;
+
+        let results_options_count = options_results.len();
+        let package_results_count = package_results.len();
+
+        if !package_results.is_empty() {
+            print_stderr(package_results.with_title()).expect("Failed to print package results");
+        }
+
+        if !options_results.is_empty() {
+            print_stderr(options_results.with_title()).expect("Failed to print options results");
+        }
+
+        info!(
+            "Found {package_results_count} packages and {results_options_count} options for '{name}'."
+        );
+        Ok(())
+    }
+
+    async fn search_options(&self, name: &str) -> Result<Vec<DevenvOptionResult>> {
         let build_options = nix_backend::Options {
             logging: false,
             cache_output: true,
@@ -580,14 +660,16 @@ impl Devenv {
         };
         let options = self
             .nix
-            .build(&["optionsJSON"], Some(build_options))
+            .build(&["optionsJSON"], Some(build_options), None)
             .await?;
         let options_path = options[0]
             .join("share")
             .join("doc")
             .join("nixos")
             .join("options.json");
-        let options_contents = fs::read(options_path).expect("Failed to read options.json");
+        let options_contents = fs::read(options_path)
+            .await
+            .expect("Failed to read options.json");
         let options_json: OptionResults =
             serde_json::from_slice(&options_contents).expect("Failed to parse options.json");
 
@@ -602,9 +684,17 @@ impl Devenv {
                 description: value.description,
             })
             .collect::<Vec<_>>();
-        let results_options_count = options_results.len();
 
-        let search = self.nix.search(name).await?;
+        Ok(options_results)
+    }
+
+    async fn search_packages(&self, name: &str) -> Result<Vec<DevenvPackageResult>> {
+        let search_options = nix_backend::Options {
+            logging: false,
+            cache_output: true,
+            ..Default::default()
+        };
+        let search = self.nix.search(name, Some(search_options)).await?;
         let search_json: PackageResults =
             serde_json::from_slice(&search.stdout).expect("Failed to parse search results");
         let search_results = search_json
@@ -619,32 +709,41 @@ impl Devenv {
                 description: value.description.chars().take(80).collect::<String>(),
             })
             .collect::<Vec<_>>();
-        let search_results_count = search_results.len();
 
-        if !search_results.is_empty() {
-            print_stderr(search_results.with_title()).expect("Failed to print search results");
-        }
-
-        if !options_results.is_empty() {
-            print_stderr(options_results.with_title()).expect("Failed to print options results");
-        }
-
-        info!(
-            "Found {search_results_count} packages and {results_options_count} options for '{name}'."
-        );
-        Ok(())
+        Ok(search_results)
     }
 
-    pub async fn has_processes(&mut self) -> Result<bool> {
-        if self.has_processes.is_none() {
-            let processes = self.nix.eval(&["devenv.processes"]).await?;
-            self.has_processes = Some(processes.trim() != "{}");
-        }
-        Ok(self.has_processes.unwrap())
+    pub async fn has_processes(&self) -> Result<bool> {
+        let value = self
+            .has_processes
+            .get_or_try_init(|| async {
+                let processes = self.nix.eval(&["devenv.processes"]).await?;
+                Ok::<bool, miette::Report>(processes.trim() != "{}")
+            })
+            .await?;
+        Ok(*value)
+    }
+
+    async fn load_tasks(&self) -> Result<Vec<tasks::TaskConfig>> {
+        let tasks_json_file = {
+            let span = info_span!("load_tasks", devenv.user_message = "Evaluating tasks");
+            let gc_root = self.devenv_dot_gc.join("task-config");
+            self.nix
+                .build(&["devenv.task.config"], None, Some(&gc_root))
+                .instrument(span)
+                .await?
+        };
+        // parse tasks config
+        let tasks_json = fs::read_to_string(&tasks_json_file[0])
+            .await
+            .expect("Failed to read config file");
+        let tasks: Vec<tasks::TaskConfig> =
+            serde_json::from_str(&tasks_json).expect("Failed to parse tasks config");
+        Ok(tasks)
     }
 
     pub async fn tasks_run(
-        &mut self,
+        &self,
         roots: Vec<String>,
         run_mode: devenv_tasks::RunMode,
     ) -> Result<()> {
@@ -662,20 +761,8 @@ impl Devenv {
             std::env::set_var(key, value);
         }
 
-        let tasks_json_file = {
-            // TODO: No newline
-            let span = info_span!("tasks_run", devenv.user_message = "Evaluating tasks");
-            self.nix
-                .build(&["devenv.task.config"], None)
-                .instrument(span)
-                .await?
-        };
-        // parse tasks config
-        let tasks_json =
-            std::fs::read_to_string(&tasks_json_file[0]).expect("Failed to read config file");
-        let tasks: Vec<tasks::TaskConfig> =
-            serde_json::from_str(&tasks_json).expect("Failed to parse tasks config");
-        // run tasks
+        let tasks = self.load_tasks().await?;
+
         // Convert global options to verbosity level
         let verbosity = if self.global_options.quiet {
             tasks::VerbosityLevel::Quiet
@@ -695,7 +782,7 @@ impl Devenv {
             serde_json::to_string_pretty(&config).unwrap()
         );
 
-        let mut tui = tasks::TasksUi::new(config, verbosity).await?;
+        let mut tui = tasks::TasksUi::builder(config, verbosity).build().await?;
         let (tasks_status, outputs) = tui.run().await?;
 
         if tasks_status.failed > 0 || tasks_status.dependency_failed > 0 {
@@ -709,24 +796,42 @@ impl Devenv {
         Ok(())
     }
 
-    async fn capture_shell_environment(&mut self) -> Result<HashMap<String, String>> {
+    pub async fn tasks_list(&self) -> Result<()> {
+        self.assemble(false).await?;
+
+        let tasks = self.load_tasks().await?;
+
+        if tasks.is_empty() {
+            println!("No tasks defined.");
+            return Ok(());
+        }
+
+        // Print the task tree
+        print_tasks_tree(&tasks);
+
+        Ok(())
+    }
+
+    async fn capture_shell_environment(&self) -> Result<HashMap<String, String>> {
         let temp_dir = tempfile::TempDir::with_prefix("devenv-env")
             .into_diagnostic()
-            .wrap_err("Failed to create temporary directory for environment capture")?;
+            .context("Failed to create temporary directory for environment capture")?;
 
         let script_path = temp_dir.path().join("script");
         let env_path = temp_dir.path().join("env");
 
         let script = format!("env > {}", env_path.to_string_lossy());
         fs::write(&script_path, script)
+            .await
             .into_diagnostic()
-            .wrap_err(format!(
+            .context(format!(
                 "Failed to write script to {}",
                 script_path.display()
             ))?;
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))
+        fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .await
             .into_diagnostic()
-            .wrap_err(format!(
+            .context(format!(
                 "Failed to set execute permissions on {}",
                 script_path.display()
             ))?;
@@ -734,34 +839,35 @@ impl Devenv {
         // Run script and capture its environment exports
         self.prepare_shell(&Some(script_path.to_string_lossy().into()), &[])
             .await?
-            .stderr(process::Stdio::inherit())
-            .stdout(process::Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .stdout(Stdio::inherit())
             .spawn()
             .into_diagnostic()
-            .wrap_err("Failed to execute environment capture script")?
+            .context("Failed to execute environment capture script")?
             .wait()
+            .await
             .into_diagnostic()
-            .wrap_err("Failed to wait for environment capture script to complete")?;
+            .context("Failed to wait for environment capture script to complete")?;
 
         // Parse the environment variables
-        let file = File::open(&env_path).into_diagnostic().wrap_err(format!(
-            "Failed to open environment file at {}",
-            env_path.display()
-        ))?;
+        let file = File::open(&env_path)
+            .await
+            .into_diagnostic()
+            .context(format!(
+                "Failed to open environment file at {}",
+                env_path.display()
+            ))?;
         let reader = BufReader::new(file);
-        let shell_envs = reader
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|line| {
-                let mut parts = line.splitn(2, '=');
-                match (parts.next(), parts.next()) {
-                    (Some(key), Some(value)) => Some((key.to_string(), value.to_string())),
-                    _ => None,
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut shell_envs = Vec::new();
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut parts = line.splitn(2, '=');
+            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                shell_envs.push((key.to_string(), value.to_string()));
+            }
+        }
 
-        let config_clean = self.config.clean.clone().unwrap_or_default();
+        let config_clean = self.config.read().await.clean.clone().unwrap_or_default();
         let mut envs: HashMap<String, String> = {
             let vars = std::env::vars();
             if self.global_options.clean.is_some() || config_clean.enabled {
@@ -782,21 +888,19 @@ impl Devenv {
         Ok(envs)
     }
 
-    pub async fn test(&mut self) -> Result<()> {
+    pub async fn test(&self) -> Result<()> {
         self.assemble(true).await?;
 
         // collect tests
         let test_script = {
             let span = info_span!("test", devenv.user_message = "Building tests");
+            let gc_root = self.devenv_dot_gc.join("test");
             self.nix
-                .build(&["devenv.test"], None)
+                .build(&["devenv.test"], None, Some(&gc_root))
                 .instrument(span)
                 .await?
         };
         let test_script_path = &test_script[0];
-
-        // Add GC root for test script to prevent garbage collection
-        self.nix.add_gc("test", test_script_path).await?;
 
         let test_script = test_script_path.to_string_lossy().to_string();
 
@@ -819,19 +923,20 @@ impl Devenv {
                 .envs(envs)
                 .spawn()
                 .into_diagnostic()
-                .wrap_err(format!(
+                .context(format!(
                     "Failed to spawn test process using {}",
                     test_script
                 ))?
                 .wait_with_output()
+                .await
                 .into_diagnostic()
-                .wrap_err("Failed to get output from test process")
+                .context("Failed to get output from test process")
         }
         .instrument(span)
         .await?;
 
         if self.has_processes().await? {
-            self.down()?;
+            self.down().await?;
         }
 
         if !result.status.success() {
@@ -843,14 +948,14 @@ impl Devenv {
         }
     }
 
-    pub async fn info(&mut self) -> Result<()> {
+    pub async fn info(&self) -> Result<()> {
         self.assemble(false).await?;
         let output = self.nix.metadata().await?;
         println!("{}", output);
         Ok(())
     }
 
-    pub async fn build(&mut self, attributes: &[String]) -> Result<()> {
+    pub async fn build(&self, attributes: &[String]) -> Result<()> {
         let span = info_span!("build", devenv.user_message = "Building");
         async move {
             self.assemble(false).await?;
@@ -888,6 +993,7 @@ impl Devenv {
                 .build(
                     &attributes.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
                     None,
+                    None,
                 )
                 .await?;
             for path in paths {
@@ -900,7 +1006,7 @@ impl Devenv {
     }
 
     pub async fn up<'a>(
-        &mut self,
+        &self,
         processes: Vec<String>,
         options: &'a ProcessOptions<'a>,
     ) -> Result<()> {
@@ -915,12 +1021,12 @@ impl Devenv {
             devenv.user_message = "Building processes"
         );
         let proc_script_string = async {
-            let proc_script = self.nix.build(&["procfileScript"], None).await?;
-            let proc_script_string = proc_script[0]
-                .to_str()
-                .expect("Failed to get proc script path")
-                .to_string();
-            self.nix.add_gc("procfilescript", &proc_script[0]).await?;
+            let gc_root = self.devenv_dot_gc.join("procfilescript");
+            let paths = self
+                .nix
+                .build(&["procfileScript"], None, Some(&gc_root))
+                .await?;
+            let proc_script_string = paths[0].to_string_lossy().to_string();
             Ok::<String, miette::Report>(proc_script_string)
         }
         .instrument(span)
@@ -945,9 +1051,11 @@ impl Devenv {
                 exec {proc_script_string} {processes}
             "},
             )
+            .await
             .expect("Failed to write PROCESSES_SCRIPT");
 
-            fs::set_permissions(&processes_script, fs::Permissions::from_mode(0o755))
+            fs::set_permissions(&processes_script, std::fs::Permissions::from_mode(0o755))
+                .await
                 .expect("Failed to set permissions");
 
             let mut cmd = if let Some(envs) = options.envs {
@@ -962,29 +1070,33 @@ impl Devenv {
             };
 
             if options.detach {
-                let log_file =
-                    fs::File::create(self.processes_log()).expect("Failed to create PROCESSES_LOG");
                 let process = if !options.log_to_file {
-                    cmd.stdout(process::Stdio::inherit())
-                        .stderr(process::Stdio::inherit())
+                    cmd.stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
                         .spawn()
                         .expect("Failed to spawn process")
                 } else {
+                    let log_file = std::fs::File::create(self.processes_log())
+                        .expect("Failed to create PROCESSES_LOG");
                     cmd.stdout(log_file.try_clone().expect("Failed to clone Stdio"))
                         .stderr(log_file)
                         .spawn()
                         .expect("Failed to spawn process")
                 };
 
-                fs::write(self.processes_pid(), process.id().to_string())
+                let pid = process
+                    .id()
+                    .ok_or_else(|| miette!("Failed to get process ID"))?;
+                fs::write(self.processes_pid(), pid.to_string())
+                    .await
                     .expect("Failed to write PROCESSES_PID");
-                info!("PID is {}", process.id());
+                info!("PID is {}", pid);
                 if options.log_to_file {
                     info!("See logs:  $ tail -f {}", self.processes_log().display());
                 }
                 info!("Stop:      $ devenv processes stop");
             } else {
-                let err = cmd.exec();
+                let err = cmd.into_std().exec();
                 bail!(err);
             }
             Ok(())
@@ -993,13 +1105,14 @@ impl Devenv {
         .await
     }
 
-    pub fn down(&self) -> Result<()> {
+    pub async fn down(&self) -> Result<()> {
         if !PathBuf::from(&self.processes_pid()).exists() {
             error!("No processes running.");
             bail!("No processes running");
         }
 
         let pid = fs::read_to_string(self.processes_pid())
+            .await
             .expect("Failed to read PROCESSES_PID")
             .parse::<i32>()
             .expect("Failed to parse PROCESSES_PID");
@@ -1015,14 +1128,18 @@ impl Devenv {
             }
         }
 
-        fs::remove_file(self.processes_pid()).expect("Failed to remove PROCESSES_PID");
+        fs::remove_file(self.processes_pid())
+            .await
+            .expect("Failed to remove PROCESSES_PID");
         Ok(())
     }
 
-    pub async fn assemble(&mut self, is_testing: bool) -> Result<()> {
-        if self.assembled {
+    pub async fn assemble(&self, is_testing: bool) -> Result<()> {
+        if self.assembled.load(Ordering::Acquire) {
             return Ok(());
         }
+
+        let _permit = self.assemble_lock.acquire().await.unwrap();
 
         // Skip devenv.nix existence check if --option is provided
         if self.global_options.option.is_empty() && !self.devenv_root.join("devenv.nix").exists() {
@@ -1033,7 +1150,7 @@ impl Devenv {
             "});
         }
 
-        fs::create_dir_all(&self.devenv_dot_gc).map_err(|e| {
+        fs::create_dir_all(&self.devenv_dot_gc).await.map_err(|e| {
             miette::miette!("Failed to create {}: {}", self.devenv_dot_gc.display(), e)
         })?;
 
@@ -1041,7 +1158,8 @@ impl Devenv {
         self.nix.assemble().await?;
 
         let mut flake_inputs = BTreeMap::new();
-        for (input, attrs) in self.config.inputs.iter() {
+        let config = self.config.read().await;
+        for (input, attrs) in config.inputs.iter() {
             match config::FlakeInput::try_from(attrs) {
                 Ok(flake_input) => {
                     flake_inputs.insert(input.clone(), flake_input);
@@ -1058,24 +1176,100 @@ impl Devenv {
         )?;
         util::write_file_with_lock(
             self.devenv_dotfile.join("devenv.json"),
-            serde_json::to_string(&self.config).unwrap(),
+            serde_json::to_string(&*config).unwrap(),
         )?;
         // TODO: superceded by eval caching.
         // Remove once direnvrc migration is implemented.
         util::write_file_with_lock(
             self.devenv_dotfile.join("imports.txt"),
-            self.config.imports.join("\n"),
+            config.imports.join("\n"),
         )?;
 
-        fs::create_dir_all(&self.devenv_runtime).map_err(|e| {
-            miette::miette!("Failed to create {}: {}", self.devenv_runtime.display(), e)
-        })?;
+        fs::create_dir_all(&self.devenv_runtime)
+            .await
+            .map_err(|e| {
+                miette::miette!("Failed to create {}: {}", self.devenv_runtime.display(), e)
+            })?;
+
+        // Check for secretspec.toml and load secrets
+        let secretspec_path = self.devenv_root.join("secretspec.toml");
+        let secretspec_config_exists = config.secretspec.is_some();
+        let secretspec_enabled = config
+            .secretspec
+            .as_ref()
+            .map(|c| c.enable)
+            .unwrap_or(false); // Default to false if secretspec config is not present
+
+        if secretspec_path.exists() {
+            // Log warning when secretspec.toml exists but is not configured
+            if !secretspec_enabled && !secretspec_config_exists {
+                info!(
+                    "{}",
+                    indoc::formatdoc! {"
+                    Found secretspec.toml but secretspec integration is not enabled.
+                    
+                    To enable, add to devenv.yaml:
+                      secretspec:
+                        enable: true
+                    
+                    To disable this message:
+                      secretspec:
+                        enable: false
+                    
+                    Learn more: https://devenv.sh/integrations/secretspec/
+                "}
+                );
+            }
+
+            if secretspec_enabled {
+                // Get profile and provider from devenv.yaml config
+                let (profile, provider) = if let Some(ref secretspec_config) = config.secretspec {
+                    (
+                        secretspec_config.profile.clone(),
+                        secretspec_config.provider.clone(),
+                    )
+                } else {
+                    (None, None)
+                };
+
+                // Load and validate secrets using SecretSpec API
+                let mut secrets = secretspec::Secrets::load()
+                    .map_err(|e| miette!("Failed to load secretspec configuration: {}", e))?;
+
+                // Configure provider and profile if specified
+                if let Some(ref provider_str) = provider {
+                    secrets.set_provider(provider_str);
+                }
+                if let Some(ref profile_str) = profile {
+                    secrets.set_profile(profile_str);
+                }
+
+                // Validate secrets
+                match secrets.validate()? {
+                    Ok(validated_secrets) => {
+                        // Store resolved secrets in OnceCell for Nix to use
+                        self.secretspec_resolved
+                            .set(validated_secrets.resolved)
+                            .map_err(|_| miette!("Secretspec resolved already set"))?;
+                    }
+                    Err(validation_errors) => {
+                        bail!(
+                            "Required secrets are missing: {} (provider: {}, profile: {})",
+                            validation_errors.missing_required.join(", "),
+                            validation_errors.provider,
+                            validation_errors.profile
+                        );
+                    }
+                }
+            }
+        }
 
         // Create cli-options.nix if there are CLI options
         if !self.global_options.option.is_empty() {
             let mut cli_options = String::from("{ pkgs, lib, config, ... }: {\n");
 
-            const SUPPORTED_TYPES: &[&str] = &["string", "int", "float", "bool", "path", "pkgs"];
+            const SUPPORTED_TYPES: &[&str] =
+                &["string", "int", "float", "bool", "path", "pkg", "pkgs"];
 
             for chunk in self.global_options.option.chunks_exact(2) {
                 // Parse the path and type from the first value
@@ -1095,6 +1289,7 @@ impl Devenv {
                     "float" => chunk[1].clone(),
                     "bool" => chunk[1].clone(), // true/false will work directly in Nix
                     "path" => format!("./{}", &chunk[1]), // relative path
+                    "pkg" => format!("pkgs.{}", &chunk[1]),
                     "pkgs" => {
                         // Split by whitespace and format as a Nix list of package references
                         let items = chunk[1]
@@ -1111,7 +1306,13 @@ impl Devenv {
                     ),
                 };
 
-                cli_options.push_str(&format!("  {} = {};\n", path, value));
+                // Use lib.mkForce for all types except pkgs
+                let final_value = if type_name == "pkgs" {
+                    value
+                } else {
+                    format!("lib.mkForce {}", value)
+                };
+                cli_options.push_str(&format!("  {} = {};\n", path, final_value));
             }
 
             cli_options.push_str("}\n");
@@ -1121,7 +1322,9 @@ impl Devenv {
             // Remove the file if it exists but there are no CLI options
             let cli_options_path = self.devenv_dotfile.join("cli-options.nix");
             if cli_options_path.exists() {
-                fs::remove_file(&cli_options_path).expect("Failed to remove cli-options.nix");
+                fs::remove_file(&cli_options_path)
+                    .await
+                    .expect("Failed to remove cli-options.nix");
             }
         }
 
@@ -1156,12 +1359,12 @@ impl Devenv {
         let flake_path = self.devenv_root.join(DEVENV_FLAKE);
         util::write_file_with_lock(&flake_path, &flake)?;
 
-        self.assembled = true;
+        self.assembled.store(true, Ordering::Release);
         Ok(())
     }
 
     #[instrument(skip_all,fields(devenv.user_message = "Building shell"))]
-    pub async fn get_dev_environment(&mut self, json: bool) -> Result<DevEnv> {
+    pub async fn get_dev_environment(&self, json: bool) -> Result<DevEnv> {
         self.assemble(false).await?;
 
         let gc_root = self.devenv_dot_gc.join("shell");
@@ -1274,6 +1477,12 @@ struct DevenvPackageResult {
     description: String,
 }
 
+fn sanitize_container_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>()
+}
+
 fn cleanup_symlinks(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut to_gc = Vec::new();
     let mut removed_symlinks = Vec::new();
@@ -1282,18 +1491,280 @@ fn cleanup_symlinks(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         std::fs::create_dir_all(root).expect("Failed to create gc directory");
     }
 
-    for entry in fs::read_dir(root).expect("Failed to read directory") {
+    for entry in std::fs::read_dir(root).expect("Failed to read directory") {
         let entry = entry.expect("Failed to read entry");
         let path = entry.path();
         if path.is_symlink() {
             if !path.exists() {
                 removed_symlinks.push(path.clone());
             } else {
-                let target = fs::canonicalize(&path).expect("Failed to read link");
+                let target = std::fs::canonicalize(&path).expect("Failed to read link");
                 to_gc.push(target);
             }
         }
     }
 
     (to_gc, removed_symlinks)
+}
+
+fn print_tasks_tree(tasks: &Vec<tasks::TaskConfig>) {
+    // Group tasks by their prefix (namespace)
+    let mut namespaces: BTreeMap<String, Vec<&tasks::TaskConfig>> = BTreeMap::new();
+    let mut standalone_tasks: Vec<&tasks::TaskConfig> = Vec::new();
+
+    for task in tasks {
+        if let Some(colon_pos) = task.name.find(':') {
+            let namespace = &task.name[..colon_pos];
+            namespaces
+                .entry(namespace.to_string())
+                .or_default()
+                .push(task);
+        } else {
+            standalone_tasks.push(task);
+        }
+    }
+
+    // Build dependency information
+    let mut task_deps: HashMap<String, Vec<String>> = HashMap::new();
+    let mut task_dependents: HashMap<String, Vec<String>> = HashMap::new();
+    let task_names: HashSet<String> = tasks.iter().map(|t| t.name.clone()).collect();
+    let mut task_configs: HashMap<String, &tasks::TaskConfig> = HashMap::new();
+
+    for task in tasks {
+        task_deps.insert(task.name.clone(), task.after.clone());
+        task_configs.insert(task.name.clone(), task);
+
+        // Build reverse dependencies (dependents)
+        for dep in &task.after {
+            task_dependents
+                .entry(dep.clone())
+                .or_default()
+                .push(task.name.clone());
+        }
+
+        // Handle "before" dependencies
+        for before in &task.before {
+            task_deps
+                .entry(before.clone())
+                .or_default()
+                .push(task.name.clone());
+            task_dependents
+                .entry(task.name.clone())
+                .or_default()
+                .push(before.clone());
+        }
+    }
+
+    let mut visited = HashSet::new();
+
+    // Print namespaced tasks grouped by namespace
+    for (namespace, tasks_in_ns) in namespaces.iter() {
+        println!("{}:", namespace);
+
+        // Find roots within this namespace
+        let mut ns_roots: Vec<&str> = Vec::new();
+        for task in tasks_in_ns {
+            let deps = task_deps.get(&task.name).unwrap();
+            if deps.is_empty()
+                || !deps
+                    .iter()
+                    .any(|d| task_names.contains(d) && d.starts_with(&format!("{}:", namespace)))
+            {
+                ns_roots.push(&task.name);
+            }
+        }
+
+        // If no roots found, use all tasks in namespace
+        if ns_roots.is_empty() {
+            ns_roots = tasks_in_ns.iter().map(|t| t.name.as_str()).collect();
+        }
+
+        ns_roots.sort();
+
+        let sub_prefix = "  ";
+        for (i, root) in ns_roots.iter().enumerate() {
+            if !visited.contains(*root) {
+                let is_last = i == ns_roots.len() - 1;
+                print_task_tree_with_namespace(
+                    root,
+                    &task_dependents,
+                    &task_configs,
+                    &mut visited,
+                    sub_prefix,
+                    is_last,
+                    namespace,
+                );
+            }
+        }
+    }
+
+    // Print standalone tasks (without namespace)
+    if !standalone_tasks.is_empty() {
+        if !namespaces.is_empty() {
+            println!("(standalone)");
+        }
+
+        // Find roots among standalone tasks
+        let mut standalone_roots: Vec<&str> = Vec::new();
+        for task in &standalone_tasks {
+            let deps = task_deps.get(&task.name).unwrap();
+            if deps.is_empty()
+                || !deps
+                    .iter()
+                    .any(|d| task_names.contains(d) && !d.contains(':'))
+            {
+                standalone_roots.push(&task.name);
+            }
+        }
+
+        if standalone_roots.is_empty() {
+            standalone_roots = standalone_tasks.iter().map(|t| t.name.as_str()).collect();
+        }
+
+        standalone_roots.sort();
+
+        let sub_prefix = if namespaces.is_empty() { "" } else { "  " };
+        for (i, root) in standalone_roots.iter().enumerate() {
+            if !visited.contains(*root) {
+                let is_last = i == standalone_roots.len() - 1;
+                print_task_tree(
+                    root,
+                    &task_dependents,
+                    &task_configs,
+                    &mut visited,
+                    sub_prefix,
+                    is_last,
+                );
+            }
+        }
+    }
+}
+
+fn print_task_tree_with_namespace(
+    task_name: &str,
+    task_dependents: &HashMap<String, Vec<String>>,
+    task_configs: &HashMap<String, &tasks::TaskConfig>,
+    visited: &mut HashSet<String>,
+    prefix: &str,
+    is_last: bool,
+    namespace: &str,
+) {
+    if visited.contains(task_name) {
+        return;
+    }
+    visited.insert(task_name.to_string());
+
+    // Print the current task with tree formatting, stripping the namespace prefix
+    let connector = if is_last { "└── " } else { "├── " };
+    let display_name = task_name
+        .strip_prefix(&format!("{}:", namespace))
+        .unwrap_or(task_name);
+    print!("{}{}{}", prefix, connector, display_name);
+
+    // Add additional info if available
+    if let Some(task) = task_configs.get(task_name) {
+        let mut extra_info = Vec::new();
+
+        if task.status.is_some() {
+            extra_info.push("has status check".to_string());
+        }
+
+        if !task.exec_if_modified.is_empty() {
+            let files = task.exec_if_modified.join(", ");
+            extra_info.push(format!("watches: {}", files));
+        }
+
+        if !extra_info.is_empty() {
+            print!(" ({})", extra_info.join(", "));
+        }
+    }
+
+    println!();
+
+    // Get children (tasks that depend on this task) within the same namespace
+    let children = task_dependents.get(task_name).cloned().unwrap_or_default();
+    let mut children: Vec<_> = children
+        .into_iter()
+        .filter(|t| task_configs.contains_key(t) && t.starts_with(&format!("{}:", namespace)))
+        .collect();
+    children.sort();
+
+    // Determine the new prefix for children
+    let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+    // Print children
+    for (i, child) in children.iter().enumerate() {
+        let is_last_child = i == children.len() - 1;
+        print_task_tree_with_namespace(
+            child,
+            task_dependents,
+            task_configs,
+            visited,
+            &new_prefix,
+            is_last_child,
+            namespace,
+        );
+    }
+}
+
+fn print_task_tree(
+    task_name: &str,
+    task_dependents: &HashMap<String, Vec<String>>,
+    task_configs: &HashMap<String, &tasks::TaskConfig>,
+    visited: &mut HashSet<String>,
+    prefix: &str,
+    is_last: bool,
+) {
+    if visited.contains(task_name) {
+        return;
+    }
+    visited.insert(task_name.to_string());
+
+    // Print the current task with tree formatting
+    let connector = if is_last { "└── " } else { "├── " };
+    print!("{}{}{}", prefix, connector, task_name);
+
+    // Add additional info if available
+    if let Some(task) = task_configs.get(task_name) {
+        let mut extra_info = Vec::new();
+
+        if task.status.is_some() {
+            extra_info.push("has status check".to_string());
+        }
+
+        if !task.exec_if_modified.is_empty() {
+            let files = task.exec_if_modified.join(", ");
+            extra_info.push(format!("watches: {}", files));
+        }
+
+        if !extra_info.is_empty() {
+            print!(" ({})", extra_info.join(", "));
+        }
+    }
+
+    println!();
+
+    // Get children (tasks that depend on this task)
+    let children = task_dependents.get(task_name).cloned().unwrap_or_default();
+    let mut children: Vec<_> = children
+        .into_iter()
+        .filter(|t| task_configs.contains_key(t))
+        .collect();
+    children.sort();
+
+    // Determine the new prefix for children
+    let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+    // Print children
+    for (i, child) in children.iter().enumerate() {
+        let is_last_child = i == children.len() - 1;
+        print_task_tree(
+            child,
+            task_dependents,
+            task_configs,
+            visited,
+            &new_prefix,
+            is_last_child,
+        );
+    }
 }

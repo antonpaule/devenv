@@ -1,6 +1,7 @@
 use clap::Parser;
 use devenv::{log, Devenv, DevenvOptions};
 use miette::{IntoDiagnostic, Result, WrapErr};
+use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     path::PathBuf,
@@ -35,6 +36,56 @@ struct TestResult {
     passed: bool,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct TestConfig {
+    /// Whether to initialize a git repository for the test
+    #[serde(default = "default_git_init")]
+    git_init: bool,
+    /// Whether to run .test.sh inside the shell automatically (default: true)
+    #[serde(default = "default_use_shell")]
+    use_shell: bool,
+}
+
+fn default_git_init() -> bool {
+    true
+}
+
+fn default_use_shell() -> bool {
+    true
+}
+
+impl Default for TestConfig {
+    fn default() -> Self {
+        Self {
+            git_init: default_git_init(),
+            use_shell: default_use_shell(),
+        }
+    }
+}
+
+impl TestConfig {
+    fn load_from_path(path: &std::path::Path) -> Result<Self> {
+        // Try different config file extensions
+        let config_paths = [
+            path.join(".test-config.yml"),
+            path.join(".test-config.yaml"),
+        ];
+
+        for config_path in &config_paths {
+            if config_path.exists() {
+                let content = fs::read_to_string(config_path)
+                    .into_diagnostic()
+                    .wrap_err("Failed to read .test-config file")?;
+                return serde_yaml::from_str(&content)
+                    .into_diagnostic()
+                    .wrap_err("Failed to parse .test-config YAML");
+            }
+        }
+
+        Ok(Self::default())
+    }
+}
+
 async fn run_tests_in_directory(args: &Args) -> Result<Vec<TestResult>> {
     eprintln!("Running Tests");
 
@@ -66,6 +117,9 @@ async fn run_tests_in_directory(args: &Args) -> Result<Vec<TestResult>> {
                 eprintln!("Skipping {}", dir_name);
                 continue;
             }
+
+            // Load test configuration
+            let test_config = TestConfig::load_from_path(path)?;
 
             let mut config = devenv::config::Config::load_from(path)?;
             for input in args.override_input.chunks_exact(2) {
@@ -105,15 +159,17 @@ async fn run_tests_in_directory(args: &Args) -> Result<Vec<TestResult>> {
 
             env::set_current_dir(&devenv_root).into_diagnostic()?;
 
-            // Initialize a git repository in the temporary directory.
+            // Initialize a git repository in the temporary directory if configured to do so.
             // This helps Nix Flakes and git-hooks find the root of the project.
-            let git_init_status = Command::new("git")
-                .arg("init")
-                .arg("--initial-branch=main")
-                .status()
-                .into_diagnostic()?;
-            if !git_init_status.success() {
-                return Err(miette::miette!("Failed to initialize the git repository"));
+            if test_config.git_init {
+                let git_init_status = Command::new("git")
+                    .arg("init")
+                    .arg("--initial-branch=main")
+                    .status()
+                    .into_diagnostic()?;
+                if !git_init_status.success() {
+                    return Err(miette::miette!("Failed to initialize the git repository"));
+                }
             }
 
             let options = DevenvOptions {
@@ -128,7 +184,7 @@ async fn run_tests_in_directory(args: &Args) -> Result<Vec<TestResult>> {
                     ..Default::default()
                 }),
             };
-            let mut devenv = Devenv::new(options).await;
+            let devenv = Devenv::new(options).await;
 
             eprintln!("  Running {}", dir_name);
 
@@ -151,7 +207,7 @@ async fn run_tests_in_directory(args: &Args) -> Result<Vec<TestResult>> {
             if PathBuf::from(setup_script).exists() {
                 eprintln!("    Running {setup_script}");
                 let output = devenv
-                    .exec_in_shell(format!("./{setup_script}"), &[])
+                    .run_in_shell(format!("./{setup_script}"), &[])
                     .await?;
                 if !output.status.success() {
                     return Err(miette::miette!(
@@ -162,10 +218,39 @@ async fn run_tests_in_directory(args: &Args) -> Result<Vec<TestResult>> {
             }
 
             // TODO: wait for processes to shut down before exiting
-            let status = devenv.test().await;
+            let status = if test_config.use_shell {
+                devenv.test().await
+            } else {
+                // Run .test.sh directly - it must exist when run_test_sh is false
+                if PathBuf::from(".test.sh").exists() {
+                    eprintln!("    Running .test.sh directly");
+                    let output = Command::new("bash")
+                        .arg(".test.sh")
+                        .status()
+                        .into_diagnostic()?;
+                    if output.success() {
+                        Ok(())
+                    } else {
+                        Err(miette::miette!(
+                            "Test script failed. Status code: {}",
+                            output.code().unwrap_or(1)
+                        ))
+                    }
+                } else {
+                    Err(miette::miette!(
+                        ".test.sh file is required when use_shell is disabled"
+                    ))
+                }
+            };
+
+            let passed = status.is_ok();
+            if let Err(error) = &status {
+                eprintln!("    Error in {}: {}", dir_name, error);
+            }
+
             let result = TestResult {
                 name: dir_name.to_string(),
-                passed: status.is_ok(),
+                passed,
             };
             test_results.push(result);
 
@@ -196,22 +281,32 @@ async fn main() -> Result<ExitCode> {
     // Otherwise, run the tests in a subprocess with a fresh environment.
     let executable_path = env::current_exe().into_diagnostic()?;
     let executable_dir = executable_path.parent().unwrap();
-    let path = format!(
-        "{}:{}",
-        executable_dir.display(),
-        env::var("PATH").unwrap_or_default()
-    );
+
+    let mut env = vec![
+        ("DEVENV_RUN_TESTS", "1".to_string()),
+        ("DEVENV_NIX", env::var("DEVENV_NIX").unwrap_or_default()),
+        (
+            "PATH",
+            format!(
+                "{}:{}",
+                executable_dir.display(),
+                env::var("PATH").unwrap_or_default()
+            ),
+        ),
+        ("HOME", env::var("HOME").unwrap_or_default()),
+    ];
+
+    if let Ok(tzdir) = env::var("TZDIR") {
+        env.push(("TZDIR", tzdir));
+    }
 
     let mut cmd = Command::new(&executable_path);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .args(env::args().skip(1));
-    cmd.env_clear()
-        .env("DEVENV_RUN_TESTS", "1")
-        .env("DEVENV_NIX", env::var("DEVENV_NIX").unwrap_or_default())
-        .env("PATH", path)
-        .env("HOME", env::var("HOME").unwrap_or_default());
+        .args(env::args().skip(1))
+        .env_clear()
+        .envs(env);
 
     let output = cmd.output().into_diagnostic()?;
     if output.status.success() {

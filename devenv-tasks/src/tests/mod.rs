@@ -6,10 +6,11 @@ use crate::types::{Skipped, TaskCompleted, TaskStatus, VerbosityLevel};
 use pretty_assertions::assert_matches;
 use serde_json::json;
 use sqlx::Row;
-use std::fs;
+use std::fs::Permissions;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
+use tokio::fs::{self, File};
 
 #[tokio::test]
 async fn test_task_name() -> Result<(), Error> {
@@ -36,7 +37,10 @@ async fn test_task_name() -> Result<(), Error> {
         }))
         .unwrap();
         assert_matches!(
-            Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await,
+            Tasks::builder(config, VerbosityLevel::Verbose)
+                .with_db_path(db_path.clone())
+                .build()
+                .await,
             Err(Error::InvalidTaskName(_))
         );
     }
@@ -58,7 +62,10 @@ async fn test_task_name() -> Result<(), Error> {
         }))
         .unwrap();
         assert_matches!(
-            Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await,
+            Tasks::builder(config, VerbosityLevel::Verbose)
+                .with_db_path(db_path.clone())
+                .build()
+                .await,
             Ok(_)
         );
     }
@@ -83,7 +90,7 @@ async fn test_basic_tasks() -> Result<(), Error> {
     )?;
     let script4 = create_script("#!/bin/sh\necho 'Task 4 is running' && echo 'Task 4 completed'")?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1", "myapp:task_4"],
             "run_mode": "all",
@@ -109,9 +116,10 @@ async fn test_basic_tasks() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
     tasks.run().await;
 
@@ -134,7 +142,7 @@ async fn test_tasks_cycle() -> Result<(), Error> {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("tasks.db");
 
-    let result = Tasks::new_with_db_path(
+    let result = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1"],
             "run_mode": "all",
@@ -152,9 +160,10 @@ async fn test_tasks_cycle() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await;
     if let Err(Error::CycleDetected(_)) = result {
         // The source of the cycle can be either task.
@@ -212,7 +221,10 @@ echo 'Task 2 is running' && echo 'Task 2 completed'
     }))
     .unwrap();
 
-    let tasks1 = Tasks::new_with_db_path(config1, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     tasks1.run().await;
 
     assert_eq!(tasks1.tasks_order.len(), 1);
@@ -246,7 +258,10 @@ echo 'Task 2 is running' && echo 'Task 2 completed'
     }))
     .unwrap();
 
-    let tasks2 = Tasks::new_with_db_path(config2, db_path2, VerbosityLevel::Verbose).await?;
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+        .with_db_path(db_path2)
+        .build()
+        .await?;
     tasks2.run().await;
 
     assert_eq!(tasks2.tasks_order.len(), 1);
@@ -312,7 +327,10 @@ exit 0
     }))
     .unwrap();
 
-    let tasks1 = Tasks::new_with_db_path(config1, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     let outputs1 = tasks1.run().await;
 
     // Print the status and outputs for debugging
@@ -349,7 +367,10 @@ exit 0
     }))
     .unwrap();
 
-    let tasks2 = Tasks::new_with_db_path(config2, db_path, VerbosityLevel::Verbose).await?;
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+        .with_db_path(db_path)
+        .build()
+        .await?;
     let outputs2 = tasks2.run().await;
 
     // Print the status and outputs for debugging
@@ -394,7 +415,7 @@ async fn test_exec_if_modified() -> Result<(), Error> {
     let test_file_path = test_file.path().to_str().unwrap().to_string();
 
     // Write initial content to ensure file exists
-    std::fs::write(&test_file_path, "initial content")?;
+    fs::write(&test_file_path, "initial content").await?;
 
     // Need to create a unique task name to avoid conflicts
     let task_name = format!(
@@ -428,7 +449,10 @@ echo "Task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
 
     // Run task first time - should execute
     let outputs = tasks.run().await;
@@ -473,7 +497,10 @@ echo "Task executed successfully"
     }))
     .unwrap();
 
-    let tasks2 = Tasks::new_with_db_path(config2, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     let outputs2 = tasks2.run().await;
 
     // Print status for debugging
@@ -503,9 +530,13 @@ echo "Task executed successfully"
     );
 
     // Modify the file and set mtime to ensure detection
-    std::fs::write(&test_file_path, "modified content")?;
+    fs::write(&test_file_path, "modified content").await?;
     let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
-    std::fs::File::open(&test_file_path)?.set_modified(new_time)?;
+    File::open(&test_file_path)
+        .await?
+        .into_std()
+        .await
+        .set_modified(new_time)?;
 
     // Run task third time - should execute because file has changed
     let config3 = Config::try_from(json!({
@@ -521,7 +552,10 @@ echo "Task executed successfully"
     }))
     .unwrap();
 
-    let tasks3 = Tasks::new_with_db_path(config3, db_path, VerbosityLevel::Verbose).await?;
+    let tasks3 = Tasks::builder(config3, VerbosityLevel::Verbose)
+        .with_db_path(db_path)
+        .build()
+        .await?;
     let outputs3 = tasks3.run().await;
 
     // Print status for debugging
@@ -601,7 +635,10 @@ echo "Multiple files task executed successfully"
     .unwrap();
 
     // Create tasks with multiple files in exec_if_modified
-    let tasks = Tasks::new_with_db_path(config1, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks = Tasks::builder(config1, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
 
     // Run task first time - should execute
     let outputs = tasks.run().await;
@@ -636,7 +673,10 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::new_with_db_path(config2, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks = Tasks::builder(config2, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     let outputs = tasks.run().await;
 
     // Verify the output is preserved in the skipped task
@@ -665,7 +705,10 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks2 = Tasks::new_with_db_path(config3, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks2 = Tasks::builder(config3, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     let outputs2 = tasks2.run().await;
 
     // Verify output is still preserved on subsequent runs
@@ -680,7 +723,7 @@ echo "Multiple files task executed successfully"
     );
 
     // Modify only the second file
-    std::fs::write(test_file2.path(), "modified content for second file")?;
+    fs::write(test_file2.path(), "modified content for second file").await?;
 
     // Run task again - should execute because one file changed
     let config4 = Config::try_from(json!({
@@ -696,7 +739,10 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::new_with_db_path(config4, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks = Tasks::builder(config4, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     let outputs = tasks.run().await;
 
     // Verify the output after modification of second file
@@ -717,7 +763,7 @@ echo "Multiple files task executed successfully"
     );
 
     // Modify only the first file this time
-    std::fs::write(test_file1.path(), "modified content for first file")?;
+    fs::write(test_file1.path(), "modified content for first file").await?;
 
     // Run task again - should execute because another file changed
     let config5 = Config::try_from(json!({
@@ -733,7 +779,10 @@ echo "Multiple files task executed successfully"
     }))
     .unwrap();
 
-    let tasks = Tasks::new_with_db_path(config5, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks = Tasks::builder(config5, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     let outputs = tasks.run().await;
 
     // Verify the output when both files have been modified
@@ -776,7 +825,7 @@ async fn test_preserved_output_on_skip() -> Result<(), Error> {
     let test_file_path = test_file.path().to_str().unwrap().to_string();
 
     // Write initial content
-    std::fs::write(&test_file_path, "initial content")?;
+    fs::write(&test_file_path, "initial content").await?;
 
     // Create a command script that writes valid JSON to the outputs file
     let command_script = create_script(
@@ -804,8 +853,10 @@ echo "Task executed successfully"
         .unwrap();
 
         // Create the tasks with explicit db path
-        let tasks1 =
-            Tasks::new_with_db_path(config1, db_path.clone(), VerbosityLevel::Verbose).await?;
+        let tasks1 = Tasks::builder(config1, VerbosityLevel::Verbose)
+            .with_db_path(db_path.clone())
+            .build()
+            .await?;
 
         // Run task first time - should execute
         let outputs1 = tasks1.run().await;
@@ -848,8 +899,10 @@ echo "Task executed successfully"
         .unwrap();
 
         // Create the tasks with explicit db path
-        let tasks2 =
-            Tasks::new_with_db_path(config2, db_path.clone(), VerbosityLevel::Verbose).await?;
+        let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+            .with_db_path(db_path.clone())
+            .build()
+            .await?;
         let outputs2 = tasks2.run().await;
 
         // Print the status and outputs for debugging
@@ -888,9 +941,13 @@ echo "Task executed successfully"
     }
 
     // Modify the file to trigger a re-run and set mtime to ensure detection
-    std::fs::write(&test_file_path, "modified content")?;
+    fs::write(&test_file_path, "modified content").await?;
     let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
-    std::fs::File::open(&test_file_path)?.set_modified(new_time)?;
+    File::open(&test_file_path)
+        .await?
+        .into_std()
+        .await
+        .set_modified(new_time)?;
 
     // Third run - create a separate scope to ensure DB connection is closed
     {
@@ -909,7 +966,10 @@ echo "Task executed successfully"
         .unwrap();
 
         // Create the tasks with explicit db path
-        let tasks3 = Tasks::new_with_db_path(config3, db_path, VerbosityLevel::Verbose).await?;
+        let tasks3 = Tasks::builder(config3, VerbosityLevel::Verbose)
+            .with_db_path(db_path)
+            .build()
+            .await?;
         let outputs3 = tasks3.run().await;
 
         // Print the status and outputs for debugging
@@ -960,7 +1020,7 @@ async fn test_file_state_updated_after_task() -> Result<(), Error> {
     let test_file_path = test_dir.path().join("test_file.txt");
 
     // Write initial content
-    std::fs::write(&test_file_path, "initial content")?;
+    fs::write(&test_file_path, "initial content").await?;
     let file_path_str = test_file_path.to_str().unwrap().to_string();
 
     // Generate a unique task name
@@ -1006,11 +1066,14 @@ echo "Task completed and modified the file"
     };
 
     // Create and run the tasks
-    let tasks = Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     tasks.run().await;
 
     // Check the modified file content
-    let modified_content = std::fs::read_to_string(&test_file_path)?;
+    let modified_content = fs::read_to_string(&test_file_path).await?;
     assert_eq!(
         modified_content.trim(),
         "modified by task",
@@ -1060,7 +1123,10 @@ echo "Task completed and modified the file"
     }))
     .unwrap();
 
-    let tasks2 = Tasks::new_with_db_path(config2, db_path, VerbosityLevel::Verbose).await?;
+    let tasks2 = Tasks::builder(config2, VerbosityLevel::Verbose)
+        .with_db_path(db_path)
+        .build()
+        .await?;
     tasks2.run().await;
 
     // Check that the task was skipped
@@ -1090,7 +1156,7 @@ async fn test_file_state_updated_on_failed_task() -> Result<(), Error> {
     let test_file_path = test_dir.path().join("test_file.txt");
 
     // Write initial content
-    std::fs::write(&test_file_path, "initial content")?;
+    fs::write(&test_file_path, "initial content").await?;
     let file_path_str = test_file_path.to_str().unwrap().to_string();
 
     // Generate a unique task name
@@ -1136,7 +1202,10 @@ exit 1
     };
 
     // Create and run the tasks
-    let tasks = Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await?;
+    let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+        .with_db_path(db_path.clone())
+        .build()
+        .await?;
     tasks.run().await;
 
     // Check that the task failed
@@ -1152,7 +1221,7 @@ exit 1
     }
 
     // Check the modified file content
-    let modified_content = std::fs::read_to_string(&test_file_path)?;
+    let modified_content = fs::read_to_string(&test_file_path).await?;
     assert_eq!(
         modified_content.trim(),
         "modified by failing task",
@@ -1197,7 +1266,7 @@ async fn test_nonexistent_script() -> Result<(), Error> {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("tasks.db");
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1"],
             "run_mode": "all",
@@ -1209,9 +1278,10 @@ async fn test_nonexistent_script() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path.clone(),
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path.clone())
+    .build()
     .await?;
 
     tasks.run().await;
@@ -1244,7 +1314,7 @@ async fn test_status_without_command() -> Result<(), Error> {
 
     let status_script = create_script("#!/bin/sh\nexit 0")?;
 
-    let result = Tasks::new_with_db_path(
+    let result = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1"],
             "run_mode": "all",
@@ -1256,9 +1326,10 @@ async fn test_status_without_command() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await;
 
     assert!(matches!(result, Err(Error::MissingCommand(_))));
@@ -1299,9 +1370,10 @@ async fn test_run_mode() -> Result<(), Error> {
 
     // Single task
     {
-        let tasks =
-            Tasks::new_with_db_path(config.clone(), db_path.clone(), VerbosityLevel::Verbose)
-                .await?;
+        let tasks = Tasks::builder(config.clone(), VerbosityLevel::Verbose)
+            .with_db_path(db_path.clone())
+            .build()
+            .await?;
         tasks.run().await;
 
         let task_statuses = inspect_tasks(&tasks).await;
@@ -1319,8 +1391,10 @@ async fn test_run_mode() -> Result<(), Error> {
             run_mode: RunMode::Before,
             ..config.clone()
         };
-        let tasks =
-            Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await?;
+        let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+            .with_db_path(db_path.clone())
+            .build()
+            .await?;
         tasks.run().await;
         let task_statuses = inspect_tasks(&tasks).await;
         assert_matches!(
@@ -1338,8 +1412,10 @@ async fn test_run_mode() -> Result<(), Error> {
             run_mode: RunMode::After,
             ..config.clone()
         };
-        let tasks =
-            Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await?;
+        let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+            .with_db_path(db_path.clone())
+            .build()
+            .await?;
         tasks.run().await;
         let task_statuses = inspect_tasks(&tasks).await;
         assert_matches!(
@@ -1357,8 +1433,10 @@ async fn test_run_mode() -> Result<(), Error> {
             run_mode: RunMode::All,
             ..config.clone()
         };
-        let tasks =
-            Tasks::new_with_db_path(config, db_path.clone(), VerbosityLevel::Verbose).await?;
+        let tasks = Tasks::builder(config, VerbosityLevel::Verbose)
+            .with_db_path(db_path.clone())
+            .build()
+            .await?;
         tasks.run().await;
         let task_statuses = inspect_tasks(&tasks).await;
         assert_matches!(
@@ -1384,7 +1462,7 @@ async fn test_before_tasks() -> Result<(), Error> {
     let script2 = create_basic_script("2")?;
     let script3 = create_basic_script("3")?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1"],
             "run_mode": "all",
@@ -1406,9 +1484,10 @@ async fn test_before_tasks() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
     tasks.run().await;
 
@@ -1435,7 +1514,7 @@ async fn test_after_tasks() -> Result<(), Error> {
     let script2 = create_basic_script("2")?;
     let script3 = create_basic_script("3")?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1"],
             "run_mode": "all",
@@ -1457,9 +1536,10 @@ async fn test_after_tasks() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path.clone(),
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path.clone())
+    .build()
     .await?;
     tasks.run().await;
 
@@ -1486,7 +1566,7 @@ async fn test_before_and_after_tasks() -> Result<(), Error> {
     let script2 = create_basic_script("2")?;
     let script3 = create_basic_script("3")?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1"],
             "run_mode": "all",
@@ -1509,9 +1589,10 @@ async fn test_before_and_after_tasks() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
     tasks.run().await;
 
@@ -1539,7 +1620,7 @@ async fn test_transitive_dependencies() -> Result<(), Error> {
     let script2 = create_basic_script("2")?;
     let script3 = create_basic_script("3")?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_3"],
             "run_mode": "all",
@@ -1561,9 +1642,10 @@ async fn test_transitive_dependencies() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
     tasks.run().await;
 
@@ -1591,7 +1673,7 @@ async fn test_non_root_before_and_after() -> Result<(), Error> {
     let script2 = create_basic_script("2")?;
     let script3 = create_basic_script("3")?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_2"],
             "run_mode": "all",
@@ -1613,9 +1695,10 @@ async fn test_non_root_before_and_after() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
     tasks.run().await;
 
@@ -1633,7 +1716,7 @@ async fn test_non_root_before_and_after() -> Result<(), Error> {
 }
 
 #[tokio::test]
-async fn test_prefix_matching() -> Result<(), Error> {
+async fn test_namespace_matching() -> Result<(), Error> {
     // Create a unique tempdir for this test
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("tasks.db");
@@ -1643,54 +1726,255 @@ async fn test_prefix_matching() -> Result<(), Error> {
     let script3 = create_basic_script("3")?;
     let script4 = create_basic_script("4")?;
 
-    // Create tasks in two different namespaces
-    let tasks = Tasks::new_with_db_path(
+    // Test namespace matching scenarios:
+    // ci -> [ci:format:nixfmt, ci:format:shfmt, ci:lint:shellcheck]
+    // ci:lint -> [ci:lint:shellcheck]
+    // ci:format -> [ci:format:nixfmt, ci:format:shfmt]
+    // ci:format:nixfmt -> [ci:format:nixfmt]
+
+    // Test top-level namespace matching with exclusion of other namespaces
+    let tasks = Tasks::builder(
         Config::try_from(json!({
-            "roots": ["myapp"], // Just use the namespace prefix
+            "roots": ["ci"],
             "run_mode": "all",
             "tasks": [
                 {
-                    "name": "myapp:task_1",
+                    "name": "ci:format:nixfmt",
                     "command": script1.to_str().unwrap()
                 },
                 {
-                    "name": "myapp:task_2",
+                    "name": "ci:format:shfmt",
                     "command": script2.to_str().unwrap()
                 },
                 {
-                    "name": "myapp:task_3",
+                    "name": "ci:lint:shellcheck",
                     "command": script3.to_str().unwrap()
                 },
                 {
-                    "name": "other:task_4",
+                    "name": "other:task",
                     "command": script4.to_str().unwrap()
                 }
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path.clone())
+    .build()
     .await?;
+
     tasks.run().await;
 
     let task_statuses = inspect_tasks(&tasks).await;
-    let task_statuses = task_statuses.as_slice();
 
-    // Should only match the "myapp" namespace tasks, not "other"
+    // Should match all three tasks in the "ci" namespace, excluding "other"
     assert_eq!(
         task_statuses.len(),
         3,
-        "Should only run the myapp namespace tasks"
+        "Should run all tasks in ci namespace"
     );
 
-    // Verify we got the three myapp tasks and they all succeeded
+    // Verify all tasks succeeded and are from ci namespace
     assert!(
-        task_statuses
-            .iter()
-            .all(|(name, status)| name.starts_with("myapp:")
-                && matches!(status, TaskStatus::Completed(TaskCompleted::Success(_, _)))),
-        "All tasks should be from myapp namespace and have succeeded"
+        task_statuses.iter().all(|(name, status)| {
+            name.starts_with("ci:")
+                && matches!(status, TaskStatus::Completed(TaskCompleted::Success(_, _)))
+        }),
+        "All ci namespace tasks should succeed"
+    );
+
+    // Test ci:lint namespace matching
+    let tasks2 = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["ci:lint"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "ci:format:nixfmt",
+                    "command": script1.to_str().unwrap()
+                },
+                {
+                    "name": "ci:format:shfmt",
+                    "command": script2.to_str().unwrap()
+                },
+                {
+                    "name": "ci:lint:shellcheck",
+                    "command": script3.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await?;
+
+    tasks2.run().await;
+
+    let task_statuses2 = inspect_tasks(&tasks2).await;
+
+    // Should match only the shellcheck task
+    assert_eq!(
+        task_statuses2.len(),
+        1,
+        "Should run only tasks in ci:lint namespace"
+    );
+    assert_eq!(task_statuses2[0].0, "ci:lint:shellcheck");
+    assert!(matches!(
+        task_statuses2[0].1,
+        TaskStatus::Completed(TaskCompleted::Success(_, _))
+    ));
+
+    // Test ci:format namespace matching
+    let tasks3 = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["ci:format"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "ci:format:nixfmt",
+                    "command": script1.to_str().unwrap()
+                },
+                {
+                    "name": "ci:format:shfmt",
+                    "command": script2.to_str().unwrap()
+                },
+                {
+                    "name": "ci:lint:shellcheck",
+                    "command": script3.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await?;
+
+    tasks3.run().await;
+
+    let task_statuses3 = inspect_tasks(&tasks3).await;
+
+    // Should match both format tasks
+    assert_eq!(
+        task_statuses3.len(),
+        2,
+        "Should run both tasks in ci:format namespace"
+    );
+
+    let task_names: Vec<_> = task_statuses3
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(task_names.contains(&"ci:format:nixfmt"));
+    assert!(task_names.contains(&"ci:format:shfmt"));
+
+    // Verify both format tasks succeeded
+    assert!(
+        task_statuses3.iter().all(|(name, status)| {
+            name.starts_with("ci:format:")
+                && matches!(status, TaskStatus::Completed(TaskCompleted::Success(_, _)))
+        }),
+        "All ci:format namespace tasks should succeed"
+    );
+
+    // Test exact task name matching (should still work)
+    let tasks4 = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["ci:format:nixfmt"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "ci:format:nixfmt",
+                    "command": script1.to_str().unwrap()
+                },
+                {
+                    "name": "ci:format:shfmt",
+                    "command": script2.to_str().unwrap()
+                },
+                {
+                    "name": "ci:lint:shellcheck",
+                    "command": script3.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await?;
+
+    tasks4.run().await;
+
+    let task_statuses4 = inspect_tasks(&tasks4).await;
+
+    // Should match only the exact task
+    assert_eq!(
+        task_statuses4.len(),
+        1,
+        "Should run only the exact task match"
+    );
+    assert_eq!(task_statuses4[0].0, "ci:format:nixfmt");
+    assert!(matches!(
+        task_statuses4[0].1,
+        TaskStatus::Completed(TaskCompleted::Success(_, _))
+    ));
+
+    // Test namespace matching with trailing colon (should work same as without)
+    let tasks5 = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["ci:format:"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "ci:format:nixfmt",
+                    "command": script1.to_str().unwrap()
+                },
+                {
+                    "name": "ci:format:shfmt",
+                    "command": script2.to_str().unwrap()
+                },
+                {
+                    "name": "ci:lint:shellcheck",
+                    "command": script3.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await?;
+
+    tasks5.run().await;
+
+    let task_statuses5 = inspect_tasks(&tasks5).await;
+
+    // Should match both format tasks (same as "ci:format")
+    assert_eq!(
+        task_statuses5.len(),
+        2,
+        "Should run both tasks in ci:format: namespace"
+    );
+
+    let task_names5: Vec<_> = task_statuses5
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(task_names5.contains(&"ci:format:nixfmt"));
+    assert!(task_names5.contains(&"ci:format:shfmt"));
+
+    // Verify both format tasks succeeded
+    assert!(
+        task_statuses5.iter().all(|(name, status)| {
+            name.starts_with("ci:format:")
+                && matches!(status, TaskStatus::Completed(TaskCompleted::Success(_, _)))
+        }),
+        "All ci:format: namespace tasks should succeed"
     );
 
     Ok(())
@@ -1705,7 +1989,7 @@ async fn test_dependency_failure() -> Result<(), Error> {
     let failing_script = create_script("#!/bin/sh\necho 'Failing task' && exit 1")?;
     let dependent_script = create_script("#!/bin/sh\necho 'Dependent task' && exit 0")?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_2"],
             "run_mode": "all",
@@ -1722,9 +2006,10 @@ async fn test_dependency_failure() -> Result<(), Error> {
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
 
     tasks.run().await;
@@ -1772,7 +2057,7 @@ exit 0
 
     let task_name = "test:status_output";
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": [task_name],
             "run_mode": "all",
@@ -1785,9 +2070,10 @@ exit 0
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
 
     tasks.run().await;
@@ -1827,7 +2113,7 @@ echo '{"key": "value3"}' > $DEVENV_TASK_OUTPUT_FILE
 "#,
     )?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_3"],
             "run_mode": "all",
@@ -1849,9 +2135,10 @@ echo '{"key": "value3"}' > $DEVENV_TASK_OUTPUT_FILE
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
 
     let outputs = tasks.run().await;
@@ -1892,7 +2179,7 @@ fi
 "#,
     )?;
 
-    let tasks = Tasks::new_with_db_path(
+    let tasks = Tasks::builder(
         Config::try_from(json!({
             "roots": ["myapp:task_1", "myapp:task_2"],
             "run_mode": "all",
@@ -1910,9 +2197,10 @@ fi
             ]
         }))
         .unwrap(),
-        db_path,
         VerbosityLevel::Verbose,
     )
+    .with_db_path(db_path)
+    .build()
     .await?;
 
     let outputs = tasks.run().await;
@@ -1938,6 +2226,204 @@ fi
     Ok(())
 }
 
+#[tokio::test]
+async fn test_namespace_resolution_edge_cases() -> Result<(), Error> {
+    // Create a unique tempdir for this test
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("tasks.db");
+
+    let script1 = create_basic_script("1")?;
+    let script2 = create_basic_script("2")?;
+
+    // Test empty string namespace
+    let result = Tasks::builder(
+        Config::try_from(json!({
+            "roots": [""],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "test:task1",
+                    "command": script1.to_str().unwrap()
+                },
+                {
+                    "name": "test:task2",
+                    "command": script2.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await;
+
+    assert_matches!(result, Err(Error::TaskNotFound(name)) if name == "");
+
+    // Test whitespace-only namespace
+    let result = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["  "],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "test:task1",
+                    "command": script1.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await;
+
+    assert_matches!(result, Err(Error::TaskNotFound(name)) if name == "  ");
+
+    // Test just colon namespace
+    let result = Tasks::builder(
+        Config::try_from(json!({
+            "roots": [":"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "test:task1",
+                    "command": script1.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await;
+
+    assert_matches!(result, Err(Error::TaskNotFound(name)) if name == ":");
+
+    // Test namespace starting with colon
+    let result = Tasks::builder(
+        Config::try_from(json!({
+            "roots": [":invalid"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "test:task1",
+                    "command": script1.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await;
+
+    assert_matches!(result, Err(Error::TaskNotFound(name)) if name == ":invalid");
+
+    // Test namespace with consecutive colons
+    let result = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["test::invalid"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "test:task1",
+                    "command": script1.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await;
+
+    assert_matches!(result, Err(Error::TaskNotFound(name)) if name == "test::invalid");
+
+    // Test that trimming works correctly for valid namespaces
+    let tasks = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["  test  "],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "test:task1",
+                    "command": script1.to_str().unwrap()
+                },
+                {
+                    "name": "test:task2",
+                    "command": script2.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path.clone())
+    .build()
+    .await?;
+
+    tasks.run().await;
+
+    let task_statuses = inspect_tasks(&tasks).await;
+
+    // Should match both tasks in the "test" namespace (after trimming)
+    assert_eq!(
+        task_statuses.len(),
+        2,
+        "Should run both tasks in test namespace after trimming whitespace"
+    );
+
+    // Test that valid namespaces still work
+    let tasks = Tasks::builder(
+        Config::try_from(json!({
+            "roots": ["test"],
+            "run_mode": "all",
+            "tasks": [
+                {
+                    "name": "test:task1",
+                    "command": script1.to_str().unwrap()
+                },
+                {
+                    "name": "test:task2",
+                    "command": script2.to_str().unwrap()
+                }
+            ]
+        }))
+        .unwrap(),
+        VerbosityLevel::Verbose,
+    )
+    .with_db_path(db_path)
+    .build()
+    .await?;
+
+    tasks.run().await;
+
+    let task_statuses = inspect_tasks(&tasks).await;
+
+    // Should match both tasks in the "test" namespace
+    assert_eq!(
+        task_statuses.len(),
+        2,
+        "Should run both tasks in test namespace"
+    );
+
+    // Verify all tasks succeeded
+    assert!(
+        task_statuses.iter().all(|(name, status)| {
+            name.starts_with("test:")
+                && matches!(status, TaskStatus::Completed(TaskCompleted::Success(_, _)))
+        }),
+        "All test namespace tasks should succeed"
+    );
+
+    Ok(())
+}
+
 async fn inspect_tasks(tasks: &Tasks) -> Vec<(String, TaskStatus)> {
     let mut result = Vec::new();
     for index in &tasks.tasks_order {
@@ -1955,7 +2441,7 @@ fn create_script(script: &str) -> std::io::Result<tempfile::TempPath> {
     temp_file.write_all(script.as_bytes())?;
     temp_file
         .as_file_mut()
-        .set_permissions(fs::Permissions::from_mode(0o755))?;
+        .set_permissions(Permissions::from_mode(0o755))?;
     Ok(temp_file.into_temp_path())
 }
 

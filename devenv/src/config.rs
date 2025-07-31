@@ -108,6 +108,10 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn is_default<T: Default + PartialEq>(t: &T) -> bool {
+    t == &T::default()
+}
+
 #[derive(schematic::Config, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Clean {
     pub enabled: bool,
@@ -152,18 +156,33 @@ pub struct Config {
     pub clean: Option<Clean>,
     #[serde(skip_serializing_if = "is_false", default = "false_default")]
     pub impure: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub backend: NixBackendType,
+    #[setting(nested)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub secretspec: Option<SecretspecConfig>,
+}
+
+#[derive(schematic::Config, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SecretspecConfig {
+    #[serde(skip_serializing_if = "is_false", default = "false_default")]
+    #[setting(default = false)]
+    pub enable: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider: Option<String>,
 }
 
 // TODO: https://github.com/moonrepo/schematic/issues/105
-pub fn write_json_schema() -> Result<()> {
+pub async fn write_json_schema() -> Result<()> {
     let schema = schema_for!(Config);
     let schema = serde_json::to_string_pretty(&schema)
         .into_diagnostic()
         .wrap_err("Failed to serialize JSON schema")?;
     let path = Path::new("docs/devenv.schema.json");
-    std::fs::write(path, &schema)
+    tokio::fs::write(path, &schema)
+        .await
         .into_diagnostic()
         .wrap_err_with(|| format!("Failed to write json schema to {}", path.display()))?;
     Ok(())
@@ -185,11 +204,12 @@ impl Config {
         Ok(result?.config)
     }
 
-    pub fn write(&self) -> Result<()> {
+    pub async fn write(&self) -> Result<()> {
         let yaml = serde_yaml::to_string(&self)
             .into_diagnostic()
             .wrap_err("Failed to serialize config to YAML")?;
-        std::fs::write(YAML_CONFIG, yaml)
+        tokio::fs::write(YAML_CONFIG, yaml)
+            .await
             .into_diagnostic()
             .wrap_err("Failed to write devenv.yaml")?;
         Ok(())
@@ -339,6 +359,17 @@ mod tests {
         assert_eq!(
             config.inputs["non-flake"].url,
             Some("path:some-other-path".to_string())
+        );
+    }
+
+    #[test]
+    fn default_config_serializes_to_empty_yaml() {
+        let config = Config::default();
+        let yaml = serde_yaml::to_string(&config).expect("Failed to serialize config");
+        assert_eq!(
+            yaml.trim(),
+            "{}",
+            "Default config should serialize to empty YAML"
         );
     }
 }

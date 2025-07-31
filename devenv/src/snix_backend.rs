@@ -19,9 +19,15 @@ use snix_store::nar::{NarCalculationService, SimpleRenderer};
 use snix_store::pathinfoservice::from_addr as pathinfo_from_addr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Snix backend implementation for devenv.
+///
+/// NOTE: The snix library (EvaluationBuilder and Evaluation types) uses single-threaded
+/// reference-counted pointers (Rc<T>) internally, making these types incompatible with
+/// multi-threaded sharing. This backend creates fresh evaluator instances per operation
+/// rather than storing them in shared state.
 pub struct SnixBackend {
     #[allow(dead_code)] // Will be used when more functionality is implemented
     config: config::Config,
@@ -29,13 +35,6 @@ pub struct SnixBackend {
     global_options: cli::GlobalOptions,
     #[allow(dead_code)] // Will be used when more functionality is implemented
     paths: DevenvPaths,
-    eval_builder: Arc<
-        Mutex<
-            Option<
-                snix_eval::EvaluationBuilder<'static, 'static, 'static, Box<dyn snix_eval::EvalIO>>,
-            >,
-        >,
-    >,
 }
 
 impl SnixBackend {
@@ -50,18 +49,18 @@ impl SnixBackend {
             config,
             global_options,
             paths,
-            eval_builder: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Initialize the Snix evaluator
-    async fn init_evaluator(&self) -> Result<()> {
-        let mut eval_builder_guard = self.eval_builder.lock().unwrap();
-        if eval_builder_guard.is_some() {
-            return Ok(());
-        }
-
-        debug!("Initializing Snix evaluator");
+    /// Create a fresh Snix evaluator for a single operation.
+    ///
+    /// Since snix types use single-threaded Rc pointers, we cannot store them in shared state.
+    /// Instead, we create a fresh evaluator for each operation.
+    #[allow(dead_code)] // Will be used when backend methods are fully implemented
+    async fn create_evaluator(
+        &self,
+    ) -> Result<snix_eval::Evaluation<'static, 'static, 'static, Box<dyn snix_eval::EvalIO>>> {
+        debug!("Creating fresh Snix evaluator");
 
         // Create the required services
         let blob_service = blob_from_addr("memory://")
@@ -111,16 +110,15 @@ impl SnixBackend {
             eval_builder = eval_builder.nix_path(Some(nix_path));
         }
 
-        *eval_builder_guard = Some(eval_builder);
-        Ok(())
+        // Build the final evaluator
+        Ok(eval_builder.build())
     }
 }
 
 #[async_trait(?Send)]
 impl NixBackend for SnixBackend {
-    async fn assemble(&mut self) -> Result<()> {
-        // Initialize the evaluator on first use
-        self.init_evaluator().await?;
+    async fn assemble(&self) -> Result<()> {
+        // No shared state to initialize - evaluators are created per operation
         Ok(())
     }
 
@@ -136,12 +134,17 @@ impl NixBackend for SnixBackend {
         Ok(())
     }
 
-    fn repl(&self) -> Result<()> {
+    async fn repl(&self) -> Result<()> {
         // TODO: Implement REPL functionality
         bail!("REPL is not yet implemented for Snix backend")
     }
 
-    async fn build(&self, _attributes: &[&str], _options: Option<Options>) -> Result<Vec<PathBuf>> {
+    async fn build(
+        &self,
+        _attributes: &[&str],
+        _options: Option<Options>,
+        _gc_root: Option<&Path>,
+    ) -> Result<Vec<PathBuf>> {
         // TODO: This requires implementing the build functionality
         // using snix_glue::snix_build
         bail!("Build functionality is not yet implemented for Snix backend")
@@ -171,12 +174,12 @@ impl NixBackend for SnixBackend {
         bail!("Flake metadata is not yet implemented for Snix backend")
     }
 
-    async fn search(&self, _name: &str) -> Result<Output> {
+    async fn search(&self, _name: &str, _options: Option<Options>) -> Result<Output> {
         // TODO: Implement package search functionality
         bail!("Package search is not yet implemented for Snix backend")
     }
 
-    fn gc(&self, _paths: Vec<PathBuf>) -> Result<()> {
+    async fn gc(&self, _paths: Vec<PathBuf>) -> Result<()> {
         // TODO: Implement garbage collection
         warn!("Garbage collection not yet implemented for Snix backend");
         Ok(())
@@ -187,6 +190,16 @@ impl NixBackend for SnixBackend {
     }
 
     async fn run_nix(&self, _command: &str, _args: &[&str], _options: &Options) -> Result<Output> {
+        // Snix doesn't use external nix commands
+        bail!("Snix backend doesn't use external nix commands")
+    }
+
+    async fn run_nix_with_substituters(
+        &self,
+        _command: &str,
+        _args: &[&str],
+        _options: &Options,
+    ) -> Result<Output> {
         // Snix doesn't use external nix commands
         bail!("Snix backend doesn't use external nix commands")
     }

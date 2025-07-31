@@ -8,67 +8,70 @@ use crate::types::{
 use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument};
 
-#[derive(Debug)]
-pub struct Tasks {
-    pub roots: Vec<NodeIndex>,
-    // Stored for reporting
-    pub root_names: Vec<String>,
-    pub longest_task_name: usize,
-    pub graph: DiGraph<Arc<RwLock<TaskState>>, ()>,
-    pub tasks_order: Vec<NodeIndex>,
-    pub notify_finished: Arc<Notify>,
-    pub notify_ui: Arc<Notify>,
-    pub run_mode: RunMode,
-    pub cache: TaskCache,
+/// Builder for Tasks configuration
+pub struct TasksBuilder {
+    config: Config,
+    verbosity: VerbosityLevel,
+    db_path: Option<PathBuf>,
+    cancellation_token: Option<CancellationToken>,
 }
 
-impl Tasks {
-    pub async fn new(config: Config, verbosity: VerbosityLevel) -> Result<Self, Error> {
-        // Initialize the task cache using the environment variable
-        let cache = TaskCache::new().await.map_err(|e| {
-            Error::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to initialize task cache: {}", e),
-            ))
-        })?;
-
-        Self::new_with_config_and_cache(config, cache, verbosity).await
+impl TasksBuilder {
+    /// Create a new builder with required configuration
+    pub fn new(config: Config, verbosity: VerbosityLevel) -> Self {
+        Self {
+            config,
+            verbosity,
+            db_path: None,
+            cancellation_token: None,
+        }
     }
 
-    /// Create a new Tasks instance with a specific database path.
-    pub async fn new_with_db_path(
-        config: Config,
-        db_path: PathBuf,
-        verbosity: VerbosityLevel,
-    ) -> Result<Self, Error> {
-        // Initialize the task cache with a specific database path
-        let cache = TaskCache::with_db_path(db_path).await.map_err(|e| {
-            Error::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to initialize task cache: {}", e),
-            ))
-        })?;
-
-        Self::new_with_config_and_cache(config, cache, verbosity).await
+    /// Set the database path
+    pub fn with_db_path(mut self, db_path: PathBuf) -> Self {
+        self.db_path = Some(db_path);
+        self
     }
 
-    async fn new_with_config_and_cache(
-        config: Config,
-        cache: TaskCache,
-        verbosity: VerbosityLevel,
-    ) -> Result<Self, Error> {
+    /// Set the cancellation token for shutdown support
+    pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
+    /// Build the Tasks instance
+    pub async fn build(self) -> Result<Tasks, Error> {
+        let cache = if let Some(db_path) = self.db_path {
+            TaskCache::with_db_path(db_path).await.map_err(|e| {
+                Error::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to initialize task cache: {}", e),
+                ))
+            })?
+        } else {
+            TaskCache::new().await.map_err(|e| {
+                Error::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to initialize task cache: {}", e),
+                ))
+            })?
+        };
+
         let mut graph = DiGraph::new();
         let mut task_indices = HashMap::new();
         let mut longest_task_name = 0;
-        for task in config.tasks {
+
+        for task in self.config.tasks {
             let name = task.name.clone();
             longest_task_name = longest_task_name.max(name.len());
             if !task.name.contains(':')
@@ -85,49 +88,103 @@ impl Tasks {
             if task.status.is_some() && task.command.is_none() {
                 return Err(Error::MissingCommand(name));
             }
-            let index = graph.add_node(Arc::new(RwLock::new(TaskState::new(task, verbosity))));
+            let index = graph.add_node(Arc::new(RwLock::new(TaskState::new(
+                task,
+                self.verbosity,
+                self.cancellation_token.clone(),
+            ))));
             task_indices.insert(name, index);
         }
-        let mut roots = Vec::new();
 
-        for name in config.roots.clone() {
-            // Check for exact match first
-            if let Some(index) = task_indices.get(&name) {
-                roots.push(*index);
-                continue;
-            }
-
-            // Check if this is a namespace prefix (no colon)
-            if !name.contains(':') {
-                // This is a namespace prefix, find all tasks with this prefix
-                let matching_tasks: Vec<_> = task_indices
-                    .iter()
-                    .filter(|(task_name, _)| task_name.starts_with(&format!("{}:", name)))
-                    .map(|(_, &index)| index)
-                    .collect();
-
-                if !matching_tasks.is_empty() {
-                    roots.extend(matching_tasks);
-                    continue;
-                }
-            }
-
-            return Err(Error::TaskNotFound(name));
-        }
-        let mut tasks = Self {
+        let roots = Tasks::resolve_namespace_roots(&self.config.roots, &task_indices)?;
+        let mut tasks = Tasks {
             roots,
-            root_names: config.roots,
+            root_names: self.config.roots,
             longest_task_name,
             graph,
             notify_finished: Arc::new(Notify::new()),
             notify_ui: Arc::new(Notify::new()),
             tasks_order: vec![],
-            run_mode: config.run_mode,
+            run_mode: self.config.run_mode,
             cache,
+            cancellation_token: self.cancellation_token,
         };
+
         tasks.resolve_dependencies(task_indices).await?;
         tasks.tasks_order = tasks.schedule().await?;
         Ok(tasks)
+    }
+}
+
+#[derive(Debug)]
+pub struct Tasks {
+    pub roots: Vec<NodeIndex>,
+    // Stored for reporting
+    pub root_names: Vec<String>,
+    pub longest_task_name: usize,
+    pub graph: DiGraph<Arc<RwLock<TaskState>>, ()>,
+    pub tasks_order: Vec<NodeIndex>,
+    pub notify_finished: Arc<Notify>,
+    pub notify_ui: Arc<Notify>,
+    pub run_mode: RunMode,
+    pub cache: TaskCache,
+    pub cancellation_token: Option<CancellationToken>,
+}
+
+impl Tasks {
+    /// Create a new TasksBuilder for configuring Tasks
+    pub fn builder(config: Config, verbosity: VerbosityLevel) -> TasksBuilder {
+        TasksBuilder::new(config, verbosity)
+    }
+
+    fn resolve_namespace_roots(
+        roots: &[String],
+        task_indices: &HashMap<String, NodeIndex>,
+    ) -> Result<Vec<NodeIndex>, Error> {
+        let mut resolved_roots = Vec::new();
+
+        for name in roots {
+            let trimmed_name = name.trim();
+
+            // Validate namespace name
+            if trimmed_name.is_empty() {
+                return Err(Error::TaskNotFound(name.clone()));
+            }
+
+            // Reject invalid namespace patterns
+            if trimmed_name == ":" || trimmed_name.starts_with(':') || trimmed_name.contains("::") {
+                return Err(Error::TaskNotFound(name.clone()));
+            }
+
+            // Check for exact match first
+            if let Some(index) = task_indices.get(trimmed_name) {
+                resolved_roots.push(*index);
+                continue;
+            }
+
+            // Check if this is a namespace prefix (with or without colon)
+            let search_prefix: Cow<str> = if trimmed_name.ends_with(':') {
+                Cow::Borrowed(trimmed_name)
+            } else {
+                Cow::Owned(format!("{}:", trimmed_name))
+            };
+
+            // Find all tasks with this prefix
+            let matching_tasks: Vec<_> = task_indices
+                .iter()
+                .filter(|(task_name, _)| task_name.starts_with(&*search_prefix))
+                .map(|(_, &index)| index)
+                .collect();
+
+            if !matching_tasks.is_empty() {
+                resolved_roots.extend(matching_tasks);
+                continue;
+            }
+
+            return Err(Error::TaskNotFound(name.clone()));
+        }
+
+        Ok(resolved_roots)
     }
 
     async fn resolve_dependencies(
