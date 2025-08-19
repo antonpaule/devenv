@@ -1,18 +1,20 @@
-use super::{cli, config, nix_backend, tasks, util};
+use super::{cli, config, log::HumanReadableDuration, nix_backend, tasks, util};
 use ::nix::sys::signal;
 use ::nix::unistd::Pid;
 use clap::crate_version;
 use cli_table::Table;
 use cli_table::{print_stderr, WithTitle};
 use include_dir::{include_dir, Dir};
-use miette::{bail, miette, Context, IntoDiagnostic, Result};
+use miette::{bail, miette, IntoDiagnostic, Result, WrapErr};
 use once_cell::sync::Lazy;
+use secrecy::ExposeSecret;
 use secretspec;
 use serde::Deserialize;
 use serde_json;
 use sha2::Digest;
 use similar::{ChangeTag, TextDiff};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use std::path::{Path, PathBuf};
@@ -462,13 +464,16 @@ impl Devenv {
         skip(self),
         fields(devenv.user_message = format!("Building {name} container"))
     )]
-    pub async fn container_build(&self, name: &str) -> Result<String> {
+    pub async fn container_build(&mut self, name: &str) -> Result<String> {
         if cfg!(target_os = "macos") {
             bail!(
                 "Containers are not supported on macOS yet: https://github.com/cachix/devenv/issues/430"
             );
         }
 
+        // This container name is passed to the flake as an argument and tells the module system
+        // that we're 1. building a container 2. which container we're building.
+        self.container_name = Some(name.to_string());
         self.assemble(false).await?;
 
         let sanitized_name = sanitize_container_name(name);
@@ -488,7 +493,7 @@ impl Devenv {
     }
 
     pub async fn container_copy(
-        &self,
+        &mut self,
         name: &str,
         copy_args: &[String],
         registry: Option<&str>,
@@ -539,7 +544,7 @@ impl Devenv {
     }
 
     pub async fn container_run(
-        &self,
+        &mut self,
         name: &str,
         copy_args: &[String],
         registry: Option<&str>,
@@ -815,7 +820,7 @@ impl Devenv {
     async fn capture_shell_environment(&self) -> Result<HashMap<String, String>> {
         let temp_dir = tempfile::TempDir::with_prefix("devenv-env")
             .into_diagnostic()
-            .context("Failed to create temporary directory for environment capture")?;
+            .wrap_err("Failed to create temporary directory for environment capture")?;
 
         let script_path = temp_dir.path().join("script");
         let env_path = temp_dir.path().join("env");
@@ -824,17 +829,16 @@ impl Devenv {
         fs::write(&script_path, script)
             .await
             .into_diagnostic()
-            .context(format!(
-                "Failed to write script to {}",
-                script_path.display()
-            ))?;
+            .wrap_err_with(|| format!("Failed to write script to {}", script_path.display()))?;
         fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
             .await
             .into_diagnostic()
-            .context(format!(
-                "Failed to set execute permissions on {}",
-                script_path.display()
-            ))?;
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to set execute permissions on {}",
+                    script_path.display()
+                )
+            })?;
 
         // Run script and capture its environment exports
         self.prepare_shell(&Some(script_path.to_string_lossy().into()), &[])
@@ -843,20 +847,19 @@ impl Devenv {
             .stdout(Stdio::inherit())
             .spawn()
             .into_diagnostic()
-            .context("Failed to execute environment capture script")?
+            .wrap_err("Failed to execute environment capture script")?
             .wait()
             .await
             .into_diagnostic()
-            .context("Failed to wait for environment capture script to complete")?;
+            .wrap_err("Failed to wait for environment capture script to complete")?;
 
         // Parse the environment variables
         let file = File::open(&env_path)
             .await
             .into_diagnostic()
-            .context(format!(
-                "Failed to open environment file at {}",
-                env_path.display()
-            ))?;
+            .wrap_err_with(|| {
+                format!("Failed to open environment file at {}", env_path.display())
+            })?;
         let reader = BufReader::new(file);
         let mut shell_envs = Vec::new();
         let mut lines = reader.lines();
@@ -895,14 +898,13 @@ impl Devenv {
         let test_script = {
             let span = info_span!("test", devenv.user_message = "Building tests");
             let gc_root = self.devenv_dot_gc.join("test");
-            self.nix
+            let test_script = self
+                .nix
                 .build(&["devenv.test"], None, Some(&gc_root))
                 .instrument(span)
-                .await?
+                .await?;
+            test_script[0].to_string_lossy().to_string()
         };
-        let test_script_path = &test_script[0];
-
-        let test_script = test_script_path.to_string_lossy().to_string();
 
         let envs = self.capture_shell_environment().await?;
 
@@ -923,14 +925,11 @@ impl Devenv {
                 .envs(envs)
                 .spawn()
                 .into_diagnostic()
-                .context(format!(
-                    "Failed to spawn test process using {}",
-                    test_script
-                ))?
+                .wrap_err_with(|| format!("Failed to spawn test process using {}", test_script))?
                 .wait_with_output()
                 .await
                 .into_diagnostic()
-                .context("Failed to get output from test process")
+                .wrap_err("Failed to get output from test process")
         }
         .instrument(span)
         .await?;
@@ -1107,24 +1106,79 @@ impl Devenv {
 
     pub async fn down(&self) -> Result<()> {
         if !PathBuf::from(&self.processes_pid()).exists() {
-            error!("No processes running.");
             bail!("No processes running");
         }
 
         let pid = fs::read_to_string(self.processes_pid())
             .await
-            .expect("Failed to read PROCESSES_PID")
+            .into_diagnostic()
+            .wrap_err("Failed to read processes.pid file")?
+            .trim()
             .parse::<i32>()
-            .expect("Failed to parse PROCESSES_PID");
+            .into_diagnostic()
+            .wrap_err("Invalid PID in processes.pid file")
+            .map(Pid::from_raw)?;
 
         info!("Stopping process with PID {}", pid);
 
-        let pid = Pid::from_raw(pid);
         match signal::kill(pid, signal::Signal::SIGTERM) {
             Ok(_) => {}
             Err(_) => {
-                error!("Process with PID {} not found.", pid);
-                bail!("Process not found");
+                bail!("Process with PID {} not found.", pid);
+            }
+        }
+
+        // Wait for the process to actually shut down using exponential backoff
+        let start_time = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(30);
+        let mut wait_interval = std::time::Duration::from_millis(10);
+        const MAX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+        loop {
+            // Check if process is still running by sending signal 0 (null signal)
+            match signal::kill(pid, None) {
+                Ok(_) => {
+                    // Process still exists
+                    let elapsed = start_time.elapsed();
+                    if elapsed >= max_wait {
+                        warn!("Process {} did not shut down gracefully within {} seconds, sending SIGKILL to process group", pid, max_wait.as_secs());
+
+                        // Send SIGKILL to the entire process group
+                        // Negative PID means send to process group
+                        let pgid = Pid::from_raw(-pid.as_raw());
+                        match signal::kill(pgid, signal::Signal::SIGKILL) {
+                            Ok(_) => info!("Sent SIGKILL to process group {}", pid.as_raw()),
+                            Err(e) => warn!(
+                                "Failed to send SIGKILL to process group {}: {}",
+                                pid.as_raw(),
+                                e
+                            ),
+                        }
+
+                        // Give it a moment to die after SIGKILL
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        break;
+                    }
+
+                    tokio::time::sleep(wait_interval).await;
+
+                    // Exponential backoff: double the interval up to MAX_INTERVAL
+                    wait_interval = wait_interval.mul_f64(1.5).min(MAX_INTERVAL);
+                }
+                Err(nix::errno::Errno::ESRCH) => {
+                    // ESRCH means "No such process" - it has shut down
+                    debug!(
+                        "Process {} has shut down after {}",
+                        pid,
+                        HumanReadableDuration(start_time.elapsed())
+                    );
+                    break;
+                }
+                Err(e) => {
+                    // Some other error occurred
+                    warn!("Error checking process {}: {}", pid, e);
+                    break;
+                }
             }
         }
 
@@ -1248,8 +1302,19 @@ impl Devenv {
                 match secrets.validate()? {
                     Ok(validated_secrets) => {
                         // Store resolved secrets in OnceCell for Nix to use
+                        let resolved = secretspec::Resolved {
+                            secrets: validated_secrets
+                                .resolved
+                                .secrets
+                                .into_iter()
+                                .map(|(k, v)| (k, v.expose_secret().to_string()))
+                                .collect(),
+                            provider: validated_secrets.resolved.provider,
+                            profile: validated_secrets.resolved.profile,
+                        };
+
                         self.secretspec_resolved
-                            .set(validated_secrets.resolved)
+                            .set(resolved)
                             .map_err(|_| miette!("Secretspec resolved already set"))?;
                     }
                     Err(validation_errors) => {
@@ -1328,32 +1393,46 @@ impl Devenv {
             }
         }
 
-        // create flake.devenv.nix
+        // Create flake.devenv.nix
+        //
+        // `devenv_root` is an absolute string path to the root of the project directory.
+        // `devenv_dotfile` is an absolute string path to the devenv dotfile directory.
+        // `devenv_dotfile_path` is a relative Nix path to the dotfile directory.
+        //  This is used to load in additional files from the dotfile directory.
+        // `devenv_tmpdir` is an absolute string path to the temporary directory for this shell.
+        // `devenv_runtime` is an absolute string path to the runtime directory for this shell.
+        // `devenv_istesting` is a boolean indicating if the shell is being assembled for testing.
+        // `container_name` indicates the name of the container being built, copied, or run, if any.
         let vars = indoc::formatdoc!(
-            "version = \"{}\";
-            system = \"{}\";
-            devenv_root = \"{}\";
-            devenv_dotfile = ./{};
-            devenv_dotfile_string = \"{}\";
-            container_name = {};
-            devenv_tmpdir = \"{}\";
-            devenv_runtime = \"{}\";
-            devenv_istesting = {};
-            devenv_direnvrc_latest_version = {};
+            "version = \"{version}\";
+            system = \"{system}\";
+            devenv_root = \"{devenv_root}\";
+            devenv_dotfile = \"{devenv_dotfile}\";
+            devenv_dotfile_path = ./{devenv_dotfile_name};
+            devenv_tmpdir = \"{devenv_tmpdir}\";
+            devenv_runtime = \"{devenv_runtime}\";
+            devenv_istesting = {devenv_istesting};
+            devenv_direnvrc_latest_version = {direnv_version};
+            container_name = {container_name};
             ",
-            crate_version!(),
-            self.global_options.system,
-            self.devenv_root.display(),
-            self.devenv_dotfile.file_name().unwrap().to_str().unwrap(),
-            self.devenv_dotfile.file_name().unwrap().to_str().unwrap(),
-            self.container_name
+            version = crate_version!(),
+            system = self.global_options.system,
+            devenv_root = self.devenv_root.display(),
+            devenv_dotfile = self.devenv_dotfile.display(),
+            devenv_dotfile_name = self
+                .devenv_dotfile
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap(),
+            container_name = self
+                .container_name
                 .as_deref()
                 .map(|s| format!("\"{}\"", s))
                 .unwrap_or_else(|| "null".to_string()),
-            self.devenv_tmp,
-            self.devenv_runtime.display(),
-            is_testing,
-            DIRENVRC_VERSION.to_string()
+            devenv_tmpdir = self.devenv_tmp,
+            devenv_runtime = self.devenv_runtime.display(),
+            devenv_istesting = is_testing,
+            direnv_version = DIRENVRC_VERSION.to_string()
         );
         let flake = FLAKE_TMPL.replace("__DEVENV_VARS__", &vars);
         let flake_path = self.devenv_root.join(DEVENV_FLAKE);

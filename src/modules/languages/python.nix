@@ -347,10 +347,7 @@ in
         enable = lib.mkEnableOption "uv sync during devenv initialisation";
         arguments = lib.mkOption {
           type = lib.types.listOf lib.types.str;
-          default = [
-            "--frozen"
-            "--no-install-workspace"
-          ];
+          default = [ ];
           description = "Command line arguments pass to `uv sync` during devenv initialisation.";
           internal = true;
         };
@@ -516,6 +513,9 @@ in
         UV_PROJECT_ENVIRONMENT = "${config.env.DEVENV_STATE}/venv";
         # Force uv not to download a Python binary when the version in pyproject.toml does not match the one installed by devenv
         UV_PYTHON_DOWNLOADS = "never";
+        # Make uv choose the first python on PATH that is not uv provided. 
+        # The one it finds is then consistently the one from nix (which is what we want).
+        UV_PYTHON_PREFERENCE = "only-system";
       })
       // (lib.optionalAttrs cfg.poetry.enable {
         # Make poetry use DEVENV_ROOT/.venv

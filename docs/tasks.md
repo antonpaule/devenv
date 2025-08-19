@@ -103,7 +103,7 @@ Tasks using the `status` attribute will also cache their outputs. When a task is
 
 ## Executing tasks only when files have been modified
 
-You can specify a list of files to monitor with `execIfModified`. The task will only run if any of these files have been modified since the last successful run.
+You can specify a list of files to monitor with `execIfModified`. The task will only run if any of these files have been modified since the last successful run. This attribute supports glob patterns, allowing you to monitor multiple files matching specific patterns.
 
 ```nix title="devenv.nix"
 { pkgs, lib, config, ... }:
@@ -113,8 +113,10 @@ You can specify a list of files to monitor with `execIfModified`. The task will 
     "myapp:build" = {
       exec = "npm run build";
       execIfModified = [
-        "src"
-        "package.json"
+        "src/**/*.ts"  # All TypeScript files in src directory
+        "*.json"       # All JSON files in the current directory
+        "package.json" # Specific file
+        "src"          # Entire directory
       ];
     };
   };
@@ -174,7 +176,7 @@ All processes defined in `processes` are automatically available as tasks with t
   };
 
   # Define a task that runs before the process
-  tasks."setup-data" = {
+  tasks."app:setup-data" = {
     exec = "echo 'Setting up data...'";
     before = [ "devenv:processes:web-server" ];
   };

@@ -92,11 +92,12 @@ pub fn init_tracing(level: Level, log_format: LogFormat) {
                 .init();
         }
         LogFormat::Cli => {
-            use indicatif::ProgressStyle;
             // For CLI mode, use IndicatifLayer to coordinate ALL output with progress bars
-            let style = ProgressStyle::with_template("{spinner:.blue} {span_fields}")
-                .unwrap()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+            let style = tracing_indicatif::style::ProgressStyle::with_template(
+                "{spinner:.blue} {span_fields}",
+            )
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
             let indicatif_layer = IndicatifLayer::new()
                 .with_progress_style(style)
                 .with_span_field_formatter(DevenvFieldFormatter);
@@ -157,7 +158,7 @@ impl SpanTimings {
     }
 }
 
-struct HumanReadableDuration(Duration);
+pub struct HumanReadableDuration(pub Duration);
 
 impl std::fmt::Display for HumanReadableDuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

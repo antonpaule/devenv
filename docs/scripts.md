@@ -39,9 +39,30 @@ scripts.foo.exec = ''
 '';
 ```
 
+## Runtime packages
+
+Sometimes you need packages available only when a specific script runs, without adding them to the global environment. You can specify runtime packages using the `packages` attribute:
+
+```nix title="devenv.nix"
+{ pkgs, ... }:
+
+{
+  scripts.analyze-json = {
+    exec = ''
+      # Both curl and jq are available when this script runs
+      curl "https://httpbin.org/get?$1" | jq '.args'
+    '';
+    packages = [ pkgs.curl pkgs.jq ];
+    description = "Fetch and analyze JSON";
+  };
+}
+```
+
+The `packages` attribute ensures these tools are available in the script's PATH without polluting the global development environment.
+
 ## Pinning packages inside scripts
 
-Sometimes we don't want to expose the tools to the shell but still make sure they are pinned in a script:
+Alternatively, you can directly reference package paths in your script:
 
 ```nix title="devenv.nix"
 { pkgs, ... }:
@@ -69,6 +90,9 @@ Entering shell ...
 ## Using your favourite language
 
 Scripts can also execute using a package and have a description, which can be useful in your `enterShell`.
+
+!!! tip "Consider using tasks for shell initialization"
+    For operations that need to run when entering the shell, consider using [tasks with the `before` attribute](tasks.md#entershell-entertest) instead of `enterShell`. Tasks provide better control over execution order and dependencies.
 
 ```nix title="devenv.nix"
 { pkgs, config, lib, ... }:

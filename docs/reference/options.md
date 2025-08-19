@@ -15998,7 +15998,7 @@ null or absolute path
 *Example:*
 
 ```
-./ruby-version
+./.ruby-version
 
 ```
 
@@ -17705,6 +17705,27 @@ package
 
 
 
+## scripts.\<name>.packages
+
+
+
+Packages to be available in PATH when the script runs.
+
+
+
+*Type:*
+list of package
+
+
+
+*Default:*
+` [] `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/scripts.nix](https://github.com/cachix/devenv/blob/main/src/modules/scripts.nix)
+
+
+
 ## scripts.\<name>.binary
 
 
@@ -19116,6 +19137,29 @@ Listen address for the Dynamodb-local.
 
 *Default:*
 ` 8000 `
+
+*Declared by:*
+ - [https://github.com/cachix/devenv/blob/main/src/modules/services/dynamodb-local.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/dynamodb-local.nix)
+
+
+
+## services.dynamodb-local.sharedDb
+
+
+
+If true, enables the -sharedDb flag for DynamoDB Local.
+When enabled, DynamoDB Local creates a single database file named shared-local-instance.db.
+Every program that connects to DynamoDB accesses this file. If you delete the file, you lose any data stored in it.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+` false `
 
 *Declared by:*
  - [https://github.com/cachix/devenv/blob/main/src/modules/services/dynamodb-local.nix](https://github.com/cachix/devenv/blob/main/src/modules/services/dynamodb-local.nix)

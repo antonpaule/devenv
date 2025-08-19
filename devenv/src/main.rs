@@ -21,11 +21,8 @@ async fn main() -> Result<()> {
         Ok(())
     };
 
-    let args: Vec<String> = env::args().skip(1).collect();
-
-    let args_as_string = args.join(" ");
-
-    env::set_var("DEVENV_CMDLINE", args_as_string);
+    let args = env::args().skip(1).collect::<Vec<_>>().join(" ");
+    env::set_var("DEVENV_CMDLINE", args);
 
     let command = match cli.command {
         None | Some(Commands::Version) => return print_version(),
@@ -108,8 +105,6 @@ async fn main() -> Result<()> {
             name,
             command,
         } => {
-            devenv.container_name = name.clone();
-
             // Backwards compatibility for the legacy container flags:
             //   `devenv container <name> --copy` is now `devenv container copy <name>`
             //   `devenv container <name> --docker-run` is now `devenv container run <name>`
