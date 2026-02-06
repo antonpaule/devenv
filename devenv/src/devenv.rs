@@ -1722,7 +1722,8 @@ impl Devenv {
             .ok()
             .map(|h| h.to_string_lossy().into_owned());
 
-        let username = whoami::fallible::username().ok();
+        let username = std::env::var("USER").ok()
+            .or_else(|| whoami::fallible::username().ok());
 
         // TODO: remove in the next release
         let dotfile_relative_path = PathBuf::from(format!(
@@ -1782,7 +1783,7 @@ impl Devenv {
             active_profiles: &active_profiles,
             cli_options,
             hostname: hostname.as_deref(),
-            username: username.as_deref(),
+            username: Some(username.as_deref().unwrap_or("unknown")),
             git_root: git_root.as_deref(),
             secretspec: secretspec_data.as_ref(),
             devenv_config: &config,
